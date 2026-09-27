@@ -8,6 +8,11 @@
 #  当前包含:
 #    1. WxChat   微信通知转发代理 (Docker)
 #    2. frps     frp 服务端 (官方二进制 + systemd)
+#  特性:
+#    - 端口默认随机分配(自动避开占用), 回车即可
+#    - y/n 交互默认 Y, 直接回车=确认
+#    - 安装信息持久化 (/etc/ziyong/), 重跑脚本不丢配置
+#    - 自动检测 ufw/firewalld 并放行端口
 # ============================================================
 
 set -o pipefail
@@ -21,12 +26,27 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 PLAIN='\033[0m'
 
+ZIYONG_DIR="/etc/ziyong"
+WX_CONF="${ZIYONG_DIR}/wxchat.conf"
+
 line() { echo -e "${CYAN}────────────────────────────────────────────${PLAIN}"; }
 info() { echo -e "${GREEN}[信息]${PLAIN} $*"; }
 warn() { echo -e "${YELLOW}[注意]${PLAIN} $*"; }
 err()  { echo -e "${RED}[错误]${PLAIN} $*"; }
 
 pause_back() { read -rp "按回车返回菜单..." _; }
+
+# ask_yn "提示文字" [默认Y|N]  -> 返回0=是
+ask_yn() {
+    local prompt="$1" def="${2:-Y}" ans
+    if [ "$def" = "Y" ]; then
+        read -rp "${prompt} [Y/n]: " ans
+        case "$ans" in [nN]|[nN][oO]) return 1 ;; *) return 0 ;; esac
+    else
+        read -rp "${prompt} [y/N]: " ans
+        case "$ans" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+    fi
+}
 
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
@@ -50,6 +70,17 @@ gen_token() {
     else
         head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 32
     fi
+}
+
+# 随机取一个 20000-59999 的空闲 TCP 端口 (避开系统保留/常用段)
+random_free_port() {
+    local port
+    while :; do
+        port=$(( (RANDOM * 32768 + RANDOM) % 40000 + 20000 ))
+        if ! (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q ":${port} "; then
+            echo "$port"; return
+        fi
+    done
 }
 
 detect_arch() {
@@ -80,6 +111,23 @@ download() {
         || return 1
 }
 
+# 防火墙自动放行 TCP 端口 (检测到才操作)
+open_firewall_ports() {
+    local p
+    for p in "$@"; do
+        [ "$p" = "0" ] && continue
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+            ufw allow "${p}/tcp" >/dev/null 2>&1 && info "ufw 已放行 ${p}/tcp"
+        fi
+        if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+            firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1 \
+                && firewall-cmd --reload >/dev/null 2>&1 \
+                && info "firewalld 已放行 ${p}/tcp"
+        fi
+    done
+    warn "云服务器请自行确认厂商安全组已放行端口"
+}
+
 # 自动安装 Docker (wxchat 用)
 install_docker() {
     if command -v docker >/dev/null 2>&1; then
@@ -99,23 +147,42 @@ install_docker() {
     info "Docker 安装完成: $(docker -v)"
 }
 
+# WxChat 安装信息持久化
+save_wx_conf() { mkdir -p "$ZIYONG_DIR"; echo "WX_PORT=${WX_PORT}" > "$WX_CONF"; }
+load_wx_conf() {
+    WX_PORT="15680"
+    [ -f "$WX_CONF" ] && . "$WX_CONF"
+}
+
 # ============================================================
 #  第一部分: WxChat 微信通知转发代理
 # ============================================================
 
 WX_IMAGE="ddsderek/wxchat:latest"
 WX_NAME="wxchat"
-WX_PORT="15680"
+
+wx_installed() { docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$WX_NAME"; }
+wx_running()   { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$WX_NAME"; }
 
 wx_install() {
     check_root
+    load_wx_conf
     install_docker || return 1
+    local random_port
+    random_port=$(random_free_port)
     echo ""
-    read -rp "请输入宿主机端口 [默认 ${WX_PORT}]: " input_port
-    [ -n "$input_port" ] && WX_PORT="$input_port"
+    if wx_installed; then
+        warn "检测到已安装 WxChat (端口 ${WX_PORT}), 重装会删除旧容器, 端口沿用原值"
+    fi
+    read -rp "请输入宿主机端口 [直接回车=随机空闲端口 ${random_port}]: " input_port
+    if [ -n "$input_port" ]; then
+        WX_PORT="$input_port"
+    elif ! wx_installed; then
+        WX_PORT="$random_port"
+    fi
 
-    if docker ps -a --format '{{.Names}}' | grep -qx "$WX_NAME"; then
-        warn "检测到已存在的 ${WX_NAME} 容器, 先删除旧容器..."
+    if wx_installed; then
+        warn "删除旧容器..."
         docker rm -f "$WX_NAME" >/dev/null 2>&1
     fi
 
@@ -128,6 +195,9 @@ wx_install() {
         --restart=always \
         -p "${WX_PORT}:80" \
         "$WX_IMAGE" || { err "容器启动失败"; return 1; }
+
+    save_wx_conf
+    open_firewall_ports "$WX_PORT"
 
     local pub_ip
     pub_ip=$(get_pub_ip)
@@ -143,61 +213,67 @@ wx_install() {
 
 wx_update() {
     check_root
-    if ! docker ps -a --format '{{.Names}}' | grep -qx "$WX_NAME"; then
+    if ! wx_installed; then
         err "尚未安装 WxChat, 请先执行安装"
         return 1
     fi
-    info "更新 WxChat (拉最新镜像重建容器)..."
+    load_wx_conf
+    info "更新 WxChat (拉最新镜像重建容器, 端口沿用 ${WX_PORT})..."
     docker pull "$WX_IMAGE" && docker rm -f "$WX_NAME"
     docker run -d --name "$WX_NAME" --restart=always -p "${WX_PORT}:80" "$WX_IMAGE"
     info "更新完成"
 }
 
 wx_restart() {
-    docker restart "$WX_NAME" >/dev/null 2>&1 \
+    wx_installed && docker restart "$WX_NAME" >/dev/null 2>&1 \
         && info "WxChat 已重启" \
         || err "容器不存在或重启失败"
 }
 
 wx_stop() {
-    docker stop "$WX_NAME" >/dev/null 2>&1 \
+    wx_installed && docker stop "$WX_NAME" >/dev/null 2>&1 \
         && info "WxChat 已停止" \
         || err "容器不存在或停止失败"
 }
 
 wx_uninstall() {
     check_root
-    read -rp "确认卸载 WxChat? [y/N]: " confirm
-    case "$confirm" in
-        [yY]|[yY][eE][sS])
-            docker rm -f "$WX_NAME" >/dev/null 2>&1
-            docker rmi "$WX_IMAGE" >/dev/null 2>&1
-            info "WxChat 已卸载"
-            ;;
-        *) info "已取消" ;;
-    esac
+    if ! wx_installed; then
+        err "尚未安装 WxChat"
+        return 1
+    fi
+    if ask_yn "确认卸载 WxChat?" "Y"; then
+        docker rm -f "$WX_NAME" >/dev/null 2>&1
+        docker rmi "$WX_IMAGE" >/dev/null 2>&1
+        rm -f "$WX_CONF"
+        info "WxChat 已卸载"
+    else
+        info "已取消"
+    fi
 }
 
 wx_status() {
-    if docker ps --format '{{.Names}}' | grep -qx "$WX_NAME"; then
-        info "运行状态: ${GREEN}运行中${PLAIN}"
+    load_wx_conf
+    if wx_running; then
+        info "运行状态: ${GREEN}运行中${PLAIN} (端口 ${WX_PORT})"
         docker ps --filter "name=${WX_NAME}" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
         echo ""
         info "健康探测:"
         curl -fsS --max-time 5 -o /dev/null -w "  HTTP %{http_code} (%{time_total}s)\n" "http://127.0.0.1:${WX_PORT}" \
             || echo -e "  ${RED}本机端口 ${WX_PORT} 无响应${PLAIN}"
-    elif docker ps -a --format '{{.Names}}' | grep -qx "$WX_NAME"; then
+    elif wx_installed; then
         warn "运行状态: ${RED}已停止${PLAIN}"
         docker ps -a --filter "name=${WX_NAME}" --format "table {{.Names}}\t{{.Status}}"
     else
         err "尚未安装 WxChat"
+        return 1
     fi
     echo ""
     info "当前公网IP: $(get_pub_ip)  (企业微信可信IP填这个)"
 }
 
 wx_logs() {
-    if docker ps -a --format '{{.Names}}' | grep -qx "$WX_NAME"; then
+    if wx_installed; then
         docker logs --tail 50 -f "$WX_NAME"
     else
         err "尚未安装 WxChat"
@@ -206,10 +282,16 @@ wx_logs() {
 
 wx_menu() {
     while true; do
+        load_wx_conf
+        local tag="  ${RED}[未安装]${PLAIN}"
+        wx_running && tag="  ${GREEN}[运行中 · 端口 ${WX_PORT}]${PLAIN}"
+        wx_installed && ! wx_running && tag="  ${YELLOW}[已停止]${PLAIN}"
         clear
         echo -e "${CYAN}╔════════════════════════════════════════════╗"
         echo -e "║     ${BOLD}WxChat 微信通知代理 管理菜单${PLAIN}${CYAN}          ║"
         echo -e "╚════════════════════════════════════════════╝${PLAIN}"
+        echo ""
+        echo -e "  当前状态: ${tag}"
         echo ""
         echo -e "  ${GREEN}${BOLD}1${PLAIN}. 安装 WxChat"
         echo -e "  ${GREEN}${BOLD}2${PLAIN}. 更新 WxChat (拉最新镜像重建)"
@@ -245,18 +327,25 @@ FRPS_CONF_DIR="/etc/frp"
 FRPS_CONF_FILE="${FRPS_CONF_DIR}/frps.toml"
 FRPS_BIN="${FRPS_INSTALL_DIR}/frps"
 FRPS_SERVICE="/etc/systemd/system/frps.service"
-BIND_PORT="7000"
-DASHBOARD_PORT="7500"
-VHOST_HTTP_PORT="8080"
-VHOST_HTTPS_PORT="8443"
+FRPS_CONF_BAK="${ZIYONG_DIR}/frps.toml.bak"
+
+frps_installed() { [ -f "$FRPS_BIN" ]; }
+frps_running()   { systemctl is-active --quiet frps 2>/dev/null; }
 
 frps_install() {
     check_root
+    local r1 r2 r3 r4
+    r1=$(random_free_port); r2=$(random_free_port); r3=$(random_free_port); r4=$(random_free_port)
     echo ""
-    read -rp "frp 通信端口 [默认 ${BIND_PORT}]: " p1;      [ -n "$p1" ] && BIND_PORT="$p1"
-    read -rp "面板端口, 0不开 [默认 ${DASHBOARD_PORT}]: " p2; [ -n "$p2" ] && DASHBOARD_PORT="$p2"
-    read -rp "http穿透端口, 0不启用 [默认 ${VHOST_HTTP_PORT}]: " p3;  [ -n "$p3" ] && VHOST_HTTP_PORT="$p3"
-    read -rp "https穿透端口, 0不启用 [默认 ${VHOST_HTTPS_PORT}]: " p4; [ -n "$p4" ] && VHOST_HTTPS_PORT="$p4"
+    if frps_installed; then
+        warn "检测到已安装 frps, 重装将覆盖配置 (旧配置备份到 ${FRPS_CONF_BAK})"
+        mkdir -p "$ZIYONG_DIR"
+        cp -f "$FRPS_CONF_FILE" "$FRPS_CONF_BAK" 2>/dev/null
+    fi
+    read -rp "frp 通信端口 [直接回车=随机空闲端口 ${r1}]: " p1;        [ -n "$p1" ] && BIND_PORT="$p1" || BIND_PORT="$r1"
+    read -rp "面板端口, 0不开 [直接回车=随机空闲端口 ${r2}]: " p2;      [ -n "$p2" ] && DASHBOARD_PORT="$p2" || DASHBOARD_PORT="$r2"
+    read -rp "http穿透端口, 0不启用 [直接回车=随机空闲端口 ${r3}]: " p3;  [ -n "$p3" ] && VHOST_HTTP_PORT="$p3" || VHOST_HTTP_PORT="$r3"
+    read -rp "https穿透端口, 0不启用 [直接回车=随机空闲端口 ${r4}]: " p4; [ -n "$p4" ] && VHOST_HTTPS_PORT="$p4" || VHOST_HTTPS_PORT="$r4"
 
     local ver arch url tmp
     ver=$(get_latest_version)
@@ -266,7 +355,7 @@ frps_install() {
     tmp=$(mktemp -d)
     download "$url" "${tmp}/frp.tar.gz" || { err "下载失败, 请检查网络后重试"; rm -rf "$tmp"; return 1; }
 
-    mkdir -p "$FRPS_INSTALL_DIR" "$FRPS_CONF_DIR"
+    mkdir -p "$FRPS_INSTALL_DIR" "$FRPS_CONF_DIR" "$ZIYONG_DIR"
     tar -xzf "${tmp}/frp.tar.gz" -C "$tmp"
     cp "${tmp}/frp_${ver}_linux_${arch}/frps" "$FRPS_BIN" || { err "解压失败"; rm -rf "$tmp"; return 1; }
     chmod +x "$FRPS_BIN"
@@ -314,6 +403,8 @@ EOF
     systemctl enable --now frps || { err "服务启动失败, 请查看: journalctl -u frps -e"; return 1; }
     sleep 1
 
+    open_firewall_ports "$BIND_PORT" "$DASHBOARD_PORT" "$VHOST_HTTP_PORT" "$VHOST_HTTPS_PORT"
+
     local pub_ip
     pub_ip=$(get_pub_ip)
     echo ""
@@ -328,13 +419,12 @@ EOF
     [ "$VHOST_HTTPS_PORT" != "0" ] && echo -e "  ${BOLD}https穿透端口:${PLAIN} ${VHOST_HTTPS_PORT}"
     echo ""
     warn "配置文件: ${FRPS_CONF_FILE}   客户端 frpc.toml 需填同一 token"
-    warn "防火墙/安全组请放行以上端口 (TCP)"
     line
 }
 
 frps_update() {
     check_root
-    if [ ! -f "$FRPS_BIN" ]; then
+    if ! frps_installed; then
         err "尚未安装 frps, 请先执行安装"
         return 1
     fi
@@ -354,31 +444,33 @@ frps_update() {
     info "更新完成, 当前版本: $("$FRPS_BIN" -v 2>/dev/null)"
 }
 
-frps_restart() { systemctl restart frps && info "frps 已重启"; }
-frps_start()   { systemctl start frps   && info "frps 已启动"; }
-frps_stop()    { systemctl stop frps    && info "frps 已停止"; }
+frps_restart() { frps_installed && systemctl restart frps && info "frps 已重启" || err "尚未安装 frps"; }
+frps_start()   { frps_installed && systemctl start frps   && info "frps 已启动" || err "尚未安装 frps"; }
+frps_stop()    { frps_installed && systemctl stop frps    && info "frps 已停止" || err "尚未安装 frps"; }
 
 frps_uninstall() {
     check_root
-    read -rp "确认卸载 frps? 配置和 token 将被删除 [y/N]: " confirm
-    case "$confirm" in
-        [yY]|[yY][eE][sS])
-            systemctl disable --now frps >/dev/null 2>&1
-            rm -f "$FRPS_SERVICE" "$FRPS_BIN" "$FRPS_CONF_FILE"
-            systemctl daemon-reload
-            info "frps 已卸载"
-            ;;
-        *) info "已取消" ;;
-    esac
+    if ! frps_installed; then
+        err "尚未安装 frps"
+        return 1
+    fi
+    if ask_yn "确认卸载 frps? 配置和 token 将被删除" "Y"; then
+        systemctl disable --now frps >/dev/null 2>&1
+        rm -f "$FRPS_SERVICE" "$FRPS_BIN" "$FRPS_CONF_FILE" "$FRPS_CONF_BAK"
+        systemctl daemon-reload
+        info "frps 已卸载"
+    else
+        info "已取消"
+    fi
 }
 
 frps_status() {
-    if [ ! -f "$FRPS_BIN" ]; then
+    if ! frps_installed; then
         err "尚未安装 frps"
         return 1
     fi
     info "版本: $("$FRPS_BIN" -v 2>/dev/null)"
-    if systemctl is-active --quiet frps; then
+    if frps_running; then
         info "运行状态: ${GREEN}运行中${PLAIN}"
     else
         warn "运行状态: ${RED}已停止${PLAIN}"
@@ -399,13 +491,13 @@ frps_status() {
 }
 
 frps_logs() {
-    if [ ! -f "$FRPS_SERVICE" ]; then
+    if frps_installed; then
+        journalctl -u frps -n 50 --no-pager
+        echo ""
+        warn "以上为最近50行, 实时跟踪: journalctl -u frps -f"
+    else
         err "尚未安装 frps"
-        return 1
     fi
-    journalctl -u frps -n 50 --no-pager
-    echo ""
-    warn "以上为最近50行, 实时跟踪: journalctl -u frps -f"
 }
 
 frps_show_token() {
@@ -424,19 +516,24 @@ frps_edit() {
         return 1
     fi
     ${EDITOR:-vi} "$FRPS_CONF_FILE"
-    read -rp "配置已修改, 立即重启 frps? [Y/n]: " r
-    case "$r" in
-        [nN]*) info "已跳过重启, 请手动执行: systemctl restart frps" ;;
-        *)     systemctl restart frps && info "frps 已重启" ;;
-    esac
+    if ask_yn "配置已修改, 立即重启 frps?" "Y"; then
+        systemctl restart frps && info "frps 已重启"
+    else
+        info "已跳过重启, 请手动执行: systemctl restart frps"
+    fi
 }
 
 frps_menu() {
     while true; do
+        local tag="  ${RED}[未安装]${PLAIN}"
+        frps_running && tag="  ${GREEN}[运行中]${PLAIN}"
+        frps_installed && ! frps_running && tag="  ${YELLOW}[已停止]${PLAIN}"
         clear
         echo -e "${CYAN}╔════════════════════════════════════════════╗"
         echo -e "║       ${BOLD}frps 服务端 (内网穿透) 管理菜单${PLAIN}${CYAN}     ║"
         echo -e "╚════════════════════════════════════════════╝${PLAIN}"
+        echo ""
+        echo -e "  当前状态: ${tag}"
         echo ""
         echo -e "  ${GREEN}${BOLD}1${PLAIN}.  安装 frps"
         echo -e "  ${GREEN}${BOLD}2${PLAIN}.  更新 frps (拉取最新版本)"
@@ -474,13 +571,25 @@ frps_menu() {
 # ============================================================
 
 show_main_menu() {
+    local wx_tag="  ${RED}[未安装]${PLAIN}"
+    local frps_tag="  ${RED}[未安装]${PLAIN}"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "wxchat"; then
+        wx_tag="  ${GREEN}[运行中]${PLAIN}"
+    elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "wxchat"; then
+        wx_tag="  ${YELLOW}[已停止]${PLAIN}"
+    fi
+    if systemctl is-active --quiet frps 2>/dev/null; then
+        frps_tag="  ${GREEN}[运行中]${PLAIN}"
+    elif [ -f "/etc/systemd/system/frps.service" ]; then
+        frps_tag="  ${YELLOW}[已停止]${PLAIN}"
+    fi
     clear
     echo -e "${CYAN}╔════════════════════════════════════════════╗"
     echo -e "║      ${BOLD}ziyong 自用 VPS 服务 一键管理脚本${PLAIN}${CYAN}      ║"
     echo -e "╚════════════════════════════════════════════╝${PLAIN}"
     echo ""
-    echo -e "  ${GREEN}${BOLD}1${PLAIN}. WxChat 微信通知转发代理 (Docker)"
-    echo -e "  ${GREEN}${BOLD}2${PLAIN}. frps 服务端 (frp 内网穿透)"
+    echo -e "  ${GREEN}${BOLD}1${PLAIN}. WxChat 微信通知转发代理 (Docker)${wx_tag}"
+    echo -e "  ${GREEN}${BOLD}2${PLAIN}. frps 服务端 (frp 内网穿透)${frps_tag}"
     echo -e "  ${RED}${BOLD}0${PLAIN}. 退出"
     echo ""
     line
