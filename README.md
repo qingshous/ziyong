@@ -7,7 +7,9 @@
 ```bash
 # 海外 VPS 直连
 bash <(curl -fsSL https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh)
+```
 
+```bash
 # 国内 VPS 连不上 GitHub raw 时，套一层加速
 bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh)
 ```
@@ -15,7 +17,8 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 ## 脚本特性
 
 - **端口默认随机**：安装时端口直接回车 = 自动分配 20000-59999 之间的随机空闲端口（避开占用），也可以手动指定
-- **回车即确认**：所有 y/n 交互默认 Y（如卸载确认），直接回车就是确认
+- **回车/空格即确认**：所有 y/n 交互默认 Y（如卸载确认），回车或空格就是确认，只有输 `n` 才取消
+- **slib 快捷命令**：首次运行脚本后自动创建，以后在任意位置输入 `slib` 直接打开管理菜单（脚本更新时重跑一次即可刷新缓存）
 - **配置持久化**：安装信息保存在 `/etc/ziyong/`，重跑脚本不会丢失自定义端口
 - **防火墙自动放行**：检测到 ufw / firewalld 开启时自动放行所需端口（云厂商安全组仍需手动放行）
 - **状态一目了然**：主菜单和子菜单实时显示每个服务的 `[运行中]` / `[已停止]` / `[未安装]` 状态

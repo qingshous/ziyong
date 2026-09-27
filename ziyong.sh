@@ -10,9 +10,10 @@
 #    2. frps     frp 服务端 (官方二进制 + systemd)
 #  特性:
 #    - 端口默认随机分配(自动避开占用), 回车即可
-#    - y/n 交互默认 Y, 直接回车=确认
+#    - y/n 交互默认 Y, 回车或空格=是
 #    - 安装信息持久化 (/etc/ziyong/), 重跑脚本不丢配置
 #    - 自动检测 ufw/firewalld 并放行端口
+#    - 快捷命令: 首次运行后任意位置输入 slib 打开本脚本
 # ============================================================
 
 set -o pipefail
@@ -37,14 +38,21 @@ err()  { echo -e "${RED}[错误]${PLAIN} $*"; }
 pause_back() { read -rp "按回车返回菜单..." _; }
 
 # ask_yn "提示文字" [默认Y|N]  -> 返回0=是
+# 默认Y时: 回车或空格都=是, 只有输入 n 才是否
 ask_yn() {
     local prompt="$1" def="${2:-Y}" ans
     if [ "$def" = "Y" ]; then
-        read -rp "${prompt} [Y/n]: " ans
-        case "$ans" in [nN]|[nN][oO]) return 1 ;; *) return 0 ;; esac
+        read -rp "${prompt} [回车/空格=是, n=否]: " ans
+        case "$(echo "$ans" | tr -d ' \t')" in
+            n|N|no|NO|No|nO) return 1 ;;
+            *) return 0 ;;
+        esac
     else
-        read -rp "${prompt} [y/N]: " ans
-        case "$ans" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+        read -rp "${prompt} [y=是, 回车/空格=否]: " ans
+        case "$(echo "$ans" | tr -d ' \t')" in
+            y|Y|yes|YES|Yes|yEs|yES|YeS|yeS) return 0 ;;
+            *) return 1 ;;
+        esac
     fi
 }
 
@@ -152,6 +160,39 @@ save_wx_conf() { mkdir -p "$ZIYONG_DIR"; echo "WX_PORT=${WX_PORT}" > "$WX_CONF";
 load_wx_conf() {
     WX_PORT="15680"
     [ -f "$WX_CONF" ] && . "$WX_CONF"
+}
+
+# slib 快捷命令: 任意位置输入 slib 打开本脚本
+SHORTCUT="/usr/local/bin/slib"
+CACHE_SCRIPT="${ZIYONG_DIR}/ziyong.sh"
+
+setup_shortcut() {
+    # 非 root 直接跳过 (无权限写 /usr/local/bin)
+    [ "$(id -u)" -eq 0 ] || return 0
+    # 缓存脚本自身 (bash 文件方式运行时)
+    if [ -f "${BASH_SOURCE[0]}" ]; then
+        mkdir -p "$ZIYONG_DIR"
+        cp -f "${BASH_SOURCE[0]}" "$CACHE_SCRIPT" 2>/dev/null
+    fi
+    # 创建快捷命令 (已存在则只更新缓存)
+    if [ ! -f "$SHORTCUT" ]; then
+        if [ -f "$CACHE_SCRIPT" ]; then
+            printf '#!/usr/bin/env bash\nbash %s "$@"\n' "$CACHE_SCRIPT" > "$SHORTCUT"
+        else
+            # curl | bash 场景: 快捷命令走在线拉取 (带加速回退)
+            cat > "$SHORTCUT" <<'EOF'
+#!/usr/bin/env bash
+if curl -fsSL --max-time 15 https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh -o /tmp/ziyong.sh 2>/dev/null \
+   || curl -fsSL --max-time 15 https://ghproxy.net/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh -o /tmp/ziyong.sh 2>/dev/null; then
+    bash /tmp/ziyong.sh
+else
+    echo "[错误] 脚本下载失败, 请检查网络"
+fi
+EOF
+        fi
+        chmod +x "$SHORTCUT"
+        info "已创建快捷命令: 任意位置输入 ${YELLOW}slib${PLAIN} 即可打开本脚本"
+    fi
 }
 
 # ============================================================
@@ -597,6 +638,7 @@ show_main_menu() {
 }
 
 main() {
+    setup_shortcut
     while true; do
         show_main_menu
         case "$main_choice" in
