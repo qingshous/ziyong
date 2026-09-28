@@ -27,40 +27,64 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 
 | 服务 | 用途 |
 |------|------|
-| **1. WxChat** | 微信通知转发代理（Docker 版），NAS 无公网 IP 时配合企业微信推送通知 |
-| **2. frps** | frp 服务端（fatedier/frp 官方二进制 + systemd），内网穿透 |
+| **1. WxChat（Docker 版）** | 微信通知转发代理，官方镜像 `ddsderek/wxchat` 一键部署 |
+| **2. WxChat（nginx 版）** | 同等功能的 nginx 原生实现，**无需 Docker**，低配 NAT 机也能跑 |
+| **3. frps** | frp 服务端（fatedier/frp 官方二进制 + systemd），内网穿透 |
+
+两个版本的 WxChat 功能完全等价（都是反代企业微信 API），可任选其一安装，也可共存（不同端口）。
 
 ```
 ╔════════════════════════════════════════════╗
 ║      ziyong 自用 VPS 服务 一键管理脚本      ║
 ╚════════════════════════════════════════════╝
 
-  1. WxChat 微信通知转发代理 (Docker)
-  2. frps 服务端 (frp 内网穿透)
+  1. WxChat 微信通知转发代理 (Docker 版)
+  2. WxChat 微信通知转发代理 (nginx 版)
+  3. frps 服务端 (frp 内网穿透)
   0. 退出
 ```
 
 ---
 
-## 1. WxChat 微信通知代理
+## 1. WxChat 微信通知代理（Docker 版）
 
-基于 Docker 部署 `ddsderek/wxchat:latest`。Docker 未安装时脚本会自动安装（官方源失败自动切国内镜像源）。
+一键部署官方镜像 `ddsderek/wxchat:latest`，Docker 未安装时脚本自动安装（官方源失败自动切国内镜像源）。
 
 **子菜单**：安装 / 更新 / 重启 / 停止 / 卸载 / 状态+公网IP / 实时日志
 
 | 项 | 默认值 | 说明 |
 |----|--------|------|
 | 镜像 | `ddsderek/wxchat:latest` | 官方镜像 |
-| 宿主机端口 | `15680` | 安装时交互修改 |
+| 宿主机端口 | 随机空闲端口 | 安装时可手动指定 |
 | 重启策略 | `--restart=always` | 开机自启、异常拉起 |
-
-**安装完成后必做**：企业微信后台 → 应用 → **可信 IP**，填入 VPS 公网 IP（安装完成时和菜单"查看状态"都会打印）。
-
-访问 `http://VPS公网IP:端口` 即为 WxChat 管理页，同时也是微信通知代理地址。
 
 ---
 
-## 2. frps 服务端（frp 内网穿透）
+## 2. WxChat 微信通知代理（nginx 原生版）
+
+官方镜像 `ddsderek/wxchat` 的本质就是 nginx 反代企业微信 API，本脚本直接以 **nginx 原生方式**实现同等功能——**无需 Docker**，纯 nginx 进程内存占用仅几 MB，兼容无法跑 Docker 的低配 NAT 机。
+
+**子菜单**：安装 / 更换端口 / 重启 / 停止 / 卸载 / 状态+公网IP / 实时日志
+
+**兼容性**：
+
+| 项 | 支持范围 |
+|----|----------|
+| 系统 | Debian / Ubuntu / CentOS / Alpine（自动识别包管理器） |
+| 服务管理 | systemd 优先，无 systemd 自动用 service / 裸进程兜底 |
+| nginx 配置目录 | 自动适配 `/etc/nginx/conf.d`（Debian/CentOS）和 `/etc/nginx/http.d`（Alpine） |
+| IPv6 | 自动检测，NAT 老内核无 IPv6 时只监听 IPv4 |
+| 旧版迁移 | 检测到 Docker 版 wxchat 容器时提示一键迁移 |
+
+生成的配置与官方镜像完全一致（5 条 API 反代 + `client_max_body_size 20m` + 欢迎页）。
+
+**安装完成后必做**：企业微信后台 → 应用 → **可信 IP**，填入 VPS 公网 IP（安装完成时和菜单"查看状态"都会打印）。
+
+访问 `http://VPS公网IP:端口` 出现"微信通知转发代理搭建成功"页即为正常，同时它也是微信通知代理地址。
+
+---
+
+## 3. frps 服务端（frp 内网穿透）
 
 从 GitHub 下载 [fatedier/frp](https://github.com/fatedier/frp) 官方二进制安装，systemd 托管（开机自启、异常 5 秒自动拉起）。下载失败自动走 ghproxy.net / gh-proxy.com 加速回退。
 
@@ -86,6 +110,7 @@ token 随机生成（hex 32位），安装完成时打印，菜单"查看 token"
 ## 常见问题
 
 - **提示需要 root**：用 `sudo bash ziyong.sh` 运行。
+- **NAT 机没有 Docker**：不影响，WxChat 是 nginx 原生实现，frps 是官方二进制，全程不需要 Docker。
 - **frpc 连不上 frps**：先查安全组/防火墙是否放行 7000 端口，再核对 token 是否一致。
 - **WxChat 通知收不到**：检查企业微信可信 IP 是否填了 VPS 公网 IP；VPS 换 IP 后要同步更新。
 - **改了 frps 配置不生效**：子菜单 10 编辑后按提示重启，或 `systemctl restart frps`。

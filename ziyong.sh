@@ -6,8 +6,9 @@
 #    本地执行:   bash ziyong.sh
 #    一键远程:   bash <(curl -fsSL https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh)
 #  当前包含:
-#    1. WxChat   微信通知转发代理 (Docker)
-#    2. frps     frp 服务端 (官方二进制 + systemd)
+#    1. WxChat (Docker 版)   官方镜像 ddsderek/wxchat
+#    2. WxChat (nginx 版)    nginx 原生反代, 无需Docker, 兼容低配NAT机
+#    3. frps                 frp 服务端 (官方二进制 + systemd)
 #  特性:
 #    - 端口默认随机分配(自动避开占用), 回车即可
 #    - y/n 交互默认 Y, 回车或空格=是
@@ -28,7 +29,8 @@ BOLD='\033[1m'
 PLAIN='\033[0m'
 
 ZIYONG_DIR="/etc/ziyong"
-WX_CONF="${ZIYONG_DIR}/wxchat.conf"
+WX_NGINX_CONF_PERSIST="${ZIYONG_DIR}/wxchat.conf"
+WX_DOCKER_CONF_PERSIST="${ZIYONG_DIR}/wxchat-docker.conf"
 
 line() { echo -e "${CYAN}────────────────────────────────────────────${PLAIN}"; }
 info() { echo -e "${GREEN}[信息]${PLAIN} $*"; }
@@ -136,7 +138,7 @@ open_firewall_ports() {
     warn "云服务器请自行确认厂商安全组已放行端口"
 }
 
-# 自动安装 Docker (wxchat 用)
+# 自动安装 Docker (Docker 版 wxchat 用)
 install_docker() {
     if command -v docker >/dev/null 2>&1; then
         info "Docker 已安装: $(docker -v)"
@@ -155,12 +157,11 @@ install_docker() {
     info "Docker 安装完成: $(docker -v)"
 }
 
-# WxChat 安装信息持久化
-save_wx_conf() { mkdir -p "$ZIYONG_DIR"; echo "WX_PORT=${WX_PORT}" > "$WX_CONF"; }
-load_wx_conf() {
-    WX_PORT="15680"
-    [ -f "$WX_CONF" ] && . "$WX_CONF"
-}
+# 安装信息持久化 (WxChat 两个版本各自独立)
+save_wx_conf()  { mkdir -p "$ZIYONG_DIR"; echo "WX_PORT=${WX_PORT}" > "$WX_NGINX_CONF_PERSIST"; }
+load_wx_conf()  { WX_PORT="15680"; [ -f "$WX_NGINX_CONF_PERSIST" ] && . "$WX_NGINX_CONF_PERSIST"; }
+save_wxd_conf() { mkdir -p "$ZIYONG_DIR"; echo "WXD_PORT=${WXD_PORT}" > "$WX_DOCKER_CONF_PERSIST"; }
+load_wxd_conf() { WXD_PORT="15680"; [ -f "$WX_DOCKER_CONF_PERSIST" ] && . "$WX_DOCKER_CONF_PERSIST"; }
 
 # slib 快捷命令: 任意位置输入 slib 打开本脚本
 SHORTCUT="/usr/local/bin/slib"
@@ -196,145 +197,142 @@ EOF
 }
 
 # ============================================================
-#  第一部分: WxChat 微信通知转发代理
+#  第一部分: WxChat 微信通知转发代理 (Docker 版)
+#  官方镜像 ddsderek/wxchat:latest
 # ============================================================
 
-WX_IMAGE="ddsderek/wxchat:latest"
-WX_NAME="wxchat"
+WXD_IMAGE="ddsderek/wxchat:latest"
+WXD_NAME="wxchat"
 
-wx_installed() { docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$WX_NAME"; }
-wx_running()   { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$WX_NAME"; }
+wxd_installed() { command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$WXD_NAME"; }
+wxd_running()   { command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$WXD_NAME"; }
 
-wx_install() {
+wxd_install() {
     check_root
-    load_wx_conf
+    load_wxd_conf
     install_docker || return 1
-    local random_port
+    if wx_installed; then
+        warn "提示: nginx 版 WxChat 也在这台机器上, 注意两个版本用不同端口"
+    fi
+    local random_port input_port
     random_port=$(random_free_port)
     echo ""
-    if wx_installed; then
-        warn "检测到已安装 WxChat (端口 ${WX_PORT}), 重装会删除旧容器, 端口沿用原值"
-    fi
     read -rp "请输入宿主机端口 [直接回车=随机空闲端口 ${random_port}]: " input_port
-    if [ -n "$input_port" ]; then
-        WX_PORT="$input_port"
-    elif ! wx_installed; then
-        WX_PORT="$random_port"
+    WXD_PORT="${input_port:-$random_port}"
+
+    if wxd_installed; then
+        warn "检测到已存在的 ${WXD_NAME} 容器, 先删除旧容器..."
+        docker rm -f "$WXD_NAME" >/dev/null 2>&1
     fi
 
-    if wx_installed; then
-        warn "删除旧容器..."
-        docker rm -f "$WX_NAME" >/dev/null 2>&1
-    fi
+    info "拉取镜像 ${WXD_IMAGE} ..."
+    docker pull "$WXD_IMAGE" || { err "镜像拉取失败, 请检查网络后重试"; return 1; }
 
-    info "拉取镜像 ${WX_IMAGE} ..."
-    docker pull "$WX_IMAGE" || { err "镜像拉取失败, 请检查网络后重试"; return 1; }
-
-    info "启动容器 (端口 ${WX_PORT} -> 80) ..."
+    info "启动容器 (端口 ${WXD_PORT} -> 80) ..."
     docker run -d \
-        --name "$WX_NAME" \
+        --name "$WXD_NAME" \
         --restart=always \
-        -p "${WX_PORT}:80" \
-        "$WX_IMAGE" || { err "容器启动失败"; return 1; }
+        -p "${WXD_PORT}:80" \
+        "$WXD_IMAGE" || { err "容器启动失败"; return 1; }
 
-    save_wx_conf
-    open_firewall_ports "$WX_PORT"
+    save_wxd_conf
+    open_firewall_ports "$WXD_PORT"
 
     local pub_ip
     pub_ip=$(get_pub_ip)
     echo ""
     line
-    info "WxChat 安装完成!"
-    echo -e "  ${BOLD}访问地址:${PLAIN} http://${pub_ip}:${WX_PORT}"
-    echo -e "  ${BOLD}通知代理:${PLAIN} http://${pub_ip}:${WX_PORT} (同地址)"
+    info "WxChat (Docker 版) 安装完成!"
+    echo -e "  ${BOLD}访问地址:${PLAIN} http://${pub_ip}:${WXD_PORT}"
+    echo -e "  ${BOLD}通知代理:${PLAIN} http://${pub_ip}:${WXD_PORT} (同地址)"
     echo ""
     warn "重要: 请到 企业微信后台 -> 应用 -> 可信IP, 填入: ${YELLOW}${BOLD}${pub_ip}${PLAIN}"
     line
 }
 
-wx_update() {
+wxd_update() {
     check_root
-    if ! wx_installed; then
-        err "尚未安装 WxChat, 请先执行安装"
+    if ! wxd_installed; then
+        err "尚未安装 WxChat (Docker 版), 请先执行安装"
         return 1
     fi
-    load_wx_conf
-    info "更新 WxChat (拉最新镜像重建容器, 端口沿用 ${WX_PORT})..."
-    docker pull "$WX_IMAGE" && docker rm -f "$WX_NAME"
-    docker run -d --name "$WX_NAME" --restart=always -p "${WX_PORT}:80" "$WX_IMAGE"
+    load_wxd_conf
+    info "更新 WxChat (拉最新镜像重建容器, 端口沿用 ${WXD_PORT})..."
+    docker pull "$WXD_IMAGE" && docker rm -f "$WXD_NAME"
+    docker run -d --name "$WXD_NAME" --restart=always -p "${WXD_PORT}:80" "$WXD_IMAGE"
     info "更新完成"
 }
 
-wx_restart() {
-    wx_installed && docker restart "$WX_NAME" >/dev/null 2>&1 \
+wxd_restart() {
+    wxd_installed && docker restart "$WXD_NAME" >/dev/null 2>&1 \
         && info "WxChat 已重启" \
         || err "容器不存在或重启失败"
 }
 
-wx_stop() {
-    wx_installed && docker stop "$WX_NAME" >/dev/null 2>&1 \
+wxd_stop() {
+    wxd_installed && docker stop "$WXD_NAME" >/dev/null 2>&1 \
         && info "WxChat 已停止" \
         || err "容器不存在或停止失败"
 }
 
-wx_uninstall() {
+wxd_uninstall() {
     check_root
-    if ! wx_installed; then
-        err "尚未安装 WxChat"
+    if ! wxd_installed; then
+        err "尚未安装 WxChat (Docker 版)"
         return 1
     fi
-    if ask_yn "确认卸载 WxChat?" "Y"; then
-        docker rm -f "$WX_NAME" >/dev/null 2>&1
-        docker rmi "$WX_IMAGE" >/dev/null 2>&1
-        rm -f "$WX_CONF"
-        info "WxChat 已卸载"
+    if ask_yn "确认卸载 WxChat (Docker 版)?" "Y"; then
+        docker rm -f "$WXD_NAME" >/dev/null 2>&1
+        docker rmi "$WXD_IMAGE" >/dev/null 2>&1
+        rm -f "$WX_DOCKER_CONF_PERSIST"
+        info "WxChat (Docker 版) 已卸载"
     else
         info "已取消"
     fi
 }
 
-wx_status() {
-    load_wx_conf
-    if wx_running; then
-        info "运行状态: ${GREEN}运行中${PLAIN} (端口 ${WX_PORT})"
-        docker ps --filter "name=${WX_NAME}" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+wxd_status() {
+    load_wxd_conf
+    if wxd_running; then
+        info "运行状态: ${GREEN}运行中${PLAIN} (Docker, 端口 ${WXD_PORT})"
+        docker ps --filter "name=${WXD_NAME}" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
         echo ""
         info "健康探测:"
-        curl -fsS --max-time 5 -o /dev/null -w "  HTTP %{http_code} (%{time_total}s)\n" "http://127.0.0.1:${WX_PORT}" \
-            || echo -e "  ${RED}本机端口 ${WX_PORT} 无响应${PLAIN}"
-    elif wx_installed; then
+        curl -fsS --max-time 5 -o /dev/null -w "  HTTP %{http_code} (%{time_total}s)\n" "http://127.0.0.1:${WXD_PORT}" \
+            || echo -e "  ${RED}本机端口 ${WXD_PORT} 无响应${PLAIN}"
+    elif wxd_installed; then
         warn "运行状态: ${RED}已停止${PLAIN}"
-        docker ps -a --filter "name=${WX_NAME}" --format "table {{.Names}}\t{{.Status}}"
+        docker ps -a --filter "name=${WXD_NAME}" --format "table {{.Names}}\t{{.Status}}"
     else
-        err "尚未安装 WxChat"
+        err "尚未安装 WxChat (Docker 版)"
         return 1
     fi
     echo ""
     info "当前公网IP: $(get_pub_ip)  (企业微信可信IP填这个)"
 }
 
-wx_logs() {
-    if wx_installed; then
-        docker logs --tail 50 -f "$WX_NAME"
+wxd_logs() {
+    if wxd_installed; then
+        docker logs --tail 50 -f "$WXD_NAME"
     else
-        err "尚未安装 WxChat"
+        err "尚未安装 WxChat (Docker 版)"
     fi
 }
 
-wx_menu() {
+wxd_menu() {
     while true; do
-        load_wx_conf
+        load_wxd_conf
         local tag="  ${RED}[未安装]${PLAIN}"
-        wx_running && tag="  ${GREEN}[运行中 · 端口 ${WX_PORT}]${PLAIN}"
-        wx_installed && ! wx_running && tag="  ${YELLOW}[已停止]${PLAIN}"
+        wxd_running && tag="  ${GREEN}[运行中 · 端口 ${WXD_PORT}]${PLAIN}"
+        wxd_installed && ! wxd_running && tag="  ${YELLOW}[已停止]${PLAIN}"
         clear
         echo -e "${CYAN}╔════════════════════════════════════════════╗"
-        echo -e "║     ${BOLD}WxChat 微信通知代理 管理菜单${PLAIN}${CYAN}          ║"
+        echo -e "║  ${BOLD}WxChat 微信通知代理 管理菜单 (Docker)${PLAIN}${CYAN}    ║"
         echo -e "╚════════════════════════════════════════════╝${PLAIN}"
         echo ""
         echo -e "  当前状态: ${tag}"
         echo ""
-        echo -e "  ${GREEN}${BOLD}1${PLAIN}. 安装 WxChat"
+        echo -e "  ${GREEN}${BOLD}1${PLAIN}. 安装 WxChat (Docker 版)"
         echo -e "  ${GREEN}${BOLD}2${PLAIN}. 更新 WxChat (拉最新镜像重建)"
         echo -e "  ${GREEN}${BOLD}3${PLAIN}. 重启 WxChat"
         echo -e "  ${GREEN}${BOLD}4${PLAIN}. 停止 WxChat"
@@ -346,12 +344,298 @@ wx_menu() {
         line
         read -rp "请输入选项 [0-7]: " sub
         case "$sub" in
-            1) wx_install;    pause_back ;;
-            2) wx_update;     pause_back ;;
-            3) wx_restart;    pause_back ;;
-            4) wx_stop;       pause_back ;;
-            5) wx_uninstall;  pause_back ;;
-            6) wx_status;     pause_back ;;
+            1) wxd_install;   pause_back ;;
+            2) wxd_update;    pause_back ;;
+            3) wxd_restart;   pause_back ;;
+            4) wxd_stop;      pause_back ;;
+            5) wxd_uninstall; pause_back ;;
+            6) wxd_status;    pause_back ;;
+            7) wxd_logs ;;
+            0) return 0 ;;
+            *) warn "无效选项, 请重新输入"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+#  第二部分: WxChat 微信通知转发代理 (nginx 原生, 无需 Docker)
+#  原理: 官方镜像 ddsderek/wxchat 本质 = nginx 反代企业微信API
+#  此处直接以 nginx 原生实现, 兼容无 Docker 的低配 NAT 机
+# ============================================================
+
+WX_NGINX_CONF_NAME="wxchat.conf"
+WX_WEB_DIR="/var/www/wxchat"
+
+# 各发行版 nginx 站点配置目录 (Alpine=http.d, Debian/CentOS=conf.d)
+wx_nginx_dir() {
+    if [ -d /etc/nginx/http.d ]; then
+        echo "/etc/nginx/http.d"
+    elif [ -d /etc/nginx/conf.d ]; then
+        echo "/etc/nginx/conf.d"
+    else
+        mkdir -p /etc/nginx/conf.d
+        echo "/etc/nginx/conf.d"
+    fi
+}
+
+wx_conf_path()     { echo "$(wx_nginx_dir)/${WX_NGINX_CONF_NAME}"; }
+wx_conf_disabled() { echo "$(wx_nginx_dir)/${WX_NGINX_CONF_NAME}.disabled"; }
+
+wx_installed() { [ -f "$(wx_conf_path)" ] || [ -f "$(wx_conf_disabled)" ]; }
+wx_running()   { pgrep -x nginx >/dev/null 2>&1 && [ -f "$(wx_conf_path)" ]; }
+
+# nginx 服务控制, 兼容 systemd / service / 裸进程
+nginx_ctl() {
+    local action="$1"
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        case "$action" in
+            enable) systemctl enable --now nginx ;;
+            reload) systemctl reload nginx 2>/dev/null || systemctl restart nginx ;;
+            *)      systemctl "$action" nginx ;;
+        esac
+    else
+        case "$action" in
+            enable|start) nginx ;;
+            reload)       nginx -s reload ;;
+            stop)         nginx -s quit ;;
+            restart)      nginx -s quit 2>/dev/null; sleep 1; nginx ;;
+        esac
+    fi
+}
+
+# 多发行版安装 nginx
+wx_install_nginx() {
+    if command -v nginx >/dev/null 2>&1; then
+        info "nginx 已安装: $(nginx -v 2>&1 | cut -d'/' -f2)"
+        return 0
+    fi
+    warn "未检测到 nginx, 开始自动安装..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y && apt-get install -y nginx
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y nginx
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y nginx
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache nginx
+    else
+        err "不支持的包管理器, 请手动安装 nginx 后重试"
+        return 1
+    fi
+    command -v nginx >/dev/null 2>&1 || { err "nginx 安装失败"; return 1; }
+    info "nginx 安装完成"
+}
+
+# 生成站点配置 (与官方镜像反代规则一致)
+wx_write_config() {
+    local v6=""
+    # 仅在有 IPv6 的机器上加 ipv6 监听 (NAT 老内核可能无 IPv6)
+    [ -f /proc/net/if_inet6 ] && v6="    listen [::]:${WX_PORT};"
+    mkdir -p "$(wx_nginx_dir)"
+    cat > "$(wx_conf_path)" <<EOF
+# WxChat 微信通知转发代理 (由 ziyong.sh 生成, 等价 ddsderek/wxchat)
+server {
+    listen ${WX_PORT};
+${v6}
+    server_name _;
+    client_max_body_size 20m;
+
+    access_log /var/log/nginx/wxchat-access.log;
+    error_log  /var/log/nginx/wxchat-error.log;
+
+    location / {
+        root ${WX_WEB_DIR};
+        index index.html;
+    }
+    # 核心: 5 条反代, 与官方镜像完全一致
+    location /cgi-bin/gettoken     { proxy_pass https://qyapi.weixin.qq.com; }
+    location /cgi-bin/message/send { proxy_pass https://qyapi.weixin.qq.com; }
+    location /cgi-bin/menu/create  { proxy_pass https://qyapi.weixin.qq.com; }
+    location /cgi-bin/media/upload { proxy_pass https://qyapi.weixin.qq.com; }
+    location /cgi-bin/media/get    { proxy_pass https://qyapi.weixin.qq.com; }
+}
+EOF
+}
+
+# 生成欢迎页
+wx_write_webpage() {
+    mkdir -p "$WX_WEB_DIR"
+    cat > "${WX_WEB_DIR}/index.html" <<'EOF'
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>微信通知转发代理</title>
+<style>
+body{font-family:-apple-system,"Microsoft YaHei",sans-serif;display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;background:#f5f7fa}
+.card{background:#fff;padding:48px 64px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.08);text-align:center}
+h1{color:#07c160;font-size:24px;margin:0 0 12px}
+p{color:#666;font-size:14px;margin:4px 0}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>微信通知转发代理搭建成功!</h1>
+<p>请在企业微信后台将应用「可信IP」设置为本机公网IP</p>
+<p>代理地址: http://本机IP:端口/cgi-bin/xxx</p>
+</div>
+</body>
+</html>
+EOF
+}
+
+wx_install() {
+    check_root
+    load_wx_conf
+    if wxd_installed; then
+        warn "提示: Docker 版 WxChat 也在这台机器上, 注意两个版本用不同端口"
+    fi
+    wx_install_nginx || return 1
+    local random_port input_port
+    random_port=$(random_free_port)
+    echo ""
+    read -rp "请输入监听端口 [直接回车=随机空闲端口 ${random_port}]: " input_port
+    WX_PORT="${input_port:-$random_port}"
+
+    wx_write_webpage
+    wx_write_config
+
+    nginx -t 2>/dev/null || { err "nginx 配置测试失败, 请执行 nginx -t 查看详情"; return 1; }
+    nginx_ctl enable || { err "nginx 启动失败"; return 1; }
+
+    save_wx_conf
+    open_firewall_ports "$WX_PORT"
+
+    local pub_ip
+    pub_ip=$(get_pub_ip)
+    echo ""
+    line
+    info "WxChat (nginx 版) 安装完成! 无需 Docker, 低配 NAT 机可用"
+    echo -e "  ${BOLD}访问地址:${PLAIN} http://${pub_ip}:${WX_PORT}"
+    echo -e "  ${BOLD}通知代理:${PLAIN} http://${pub_ip}:${WX_PORT} (同地址)"
+    echo ""
+    warn "重要: 请到 企业微信后台 -> 应用 -> 可信IP, 填入: ${YELLOW}${BOLD}${pub_ip}${PLAIN}"
+    line
+}
+
+wx_change_port() {
+    check_root
+    if ! wx_installed; then
+        err "尚未安装 WxChat (nginx 版), 请先执行安装"
+        return 1
+    fi
+    load_wx_conf
+    local random_port input_port
+    random_port=$(random_free_port)
+    read -rp "新端口 (当前 ${WX_PORT}) [直接回车=随机空闲端口 ${random_port}]: " input_port
+    WX_PORT="${input_port:-$random_port}"
+    wx_write_config
+    nginx -t 2>/dev/null || { err "nginx 配置测试失败"; return 1; }
+    nginx_ctl reload || { err "nginx 重载失败"; return 1; }
+    save_wx_conf
+    open_firewall_ports "$WX_PORT"
+    info "端口已更换为 ${WX_PORT} 并生效"
+}
+
+wx_restart() {
+    if ! wx_installed; then
+        err "尚未安装 WxChat (nginx 版)"
+        return 1
+    fi
+    # 若处于停止状态(配置被禁用)先恢复
+    [ -f "$(wx_conf_disabled)" ] && mv "$(wx_conf_disabled)" "$(wx_conf_path)"
+    nginx_ctl restart && info "WxChat 已重启" || err "重启失败"
+}
+
+wx_stop() {
+    if [ ! -f "$(wx_conf_path)" ]; then
+        err "WxChat 未在运行 (或尚未安装)"
+        return 1
+    fi
+    # 停用 = 把站点配置挪为 .disabled 再重载, 不影响 nginx 其他站点
+    mv "$(wx_conf_path)" "$(wx_conf_disabled)"
+    nginx_ctl reload && info "WxChat 已停止 (nginx 其他站点不受影响)" || err "停止失败"
+}
+
+wx_uninstall() {
+    check_root
+    if ! wx_installed; then
+        err "尚未安装 WxChat (nginx 版)"
+        return 1
+    fi
+    if ask_yn "确认卸载 WxChat (nginx 版)? (仅移除站点配置, nginx 本体保留)" "Y"; then
+        rm -f "$(wx_conf_path)" "$(wx_conf_disabled)"
+        rm -rf "$WX_WEB_DIR"
+        rm -f "$WX_NGINX_CONF_PERSIST"
+        nginx_ctl reload 2>/dev/null
+        info "WxChat (nginx 版) 已卸载 (nginx 保留, 如需卸载请执行: apt/dnf/yum/apk remove nginx)"
+    else
+        info "已取消"
+    fi
+}
+
+wx_status() {
+    load_wx_conf
+    if wx_running; then
+        info "运行状态: ${GREEN}运行中${PLAIN} (nginx, 端口 ${WX_PORT})"
+        echo ""
+        info "健康探测:"
+        curl -fsS --max-time 5 -o /dev/null -w "  欢迎页: HTTP %{http_code} (%{time_total}s)\n" "http://127.0.0.1:${WX_PORT}" \
+            || echo -e "  ${RED}本机端口 ${WX_PORT} 无响应${PLAIN}"
+        curl -fsS --max-time 5 -o /dev/null -w "  API反代: HTTP %{http_code} (%{time_total}s)\n" "http://127.0.0.1:${WX_PORT}/cgi-bin/gettoken" \
+            || echo -e "  ${RED}反代路径无响应${PLAIN}"
+    elif wx_installed; then
+        warn "运行状态: ${RED}已停止${PLAIN}"
+    else
+        err "尚未安装 WxChat (nginx 版)"
+        return 1
+    fi
+    echo ""
+    info "当前公网IP: $(get_pub_ip)  (企业微信可信IP填这个)"
+}
+
+wx_logs() {
+    if [ -f /var/log/nginx/wxchat-access.log ]; then
+        tail -n 50 -f /var/log/nginx/wxchat-access.log
+    elif [ -f /var/log/nginx/wxchat-error.log ]; then
+        tail -n 50 -f /var/log/nginx/wxchat-error.log
+    else
+        err "尚未安装 WxChat (nginx 版) (或无日志)"
+    fi
+}
+
+wx_menu() {
+    while true; do
+        load_wx_conf
+        local tag="  ${RED}[未安装]${PLAIN}"
+        wx_running && tag="  ${GREEN}[运行中 · 端口 ${WX_PORT}]${PLAIN}"
+        wx_installed && ! wx_running && tag="  ${YELLOW}[已停止]${PLAIN}"
+        clear
+        echo -e "${CYAN}╔════════════════════════════════════════════╗"
+        echo -e "║  ${BOLD}WxChat 微信通知代理 管理菜单 (nginx)${PLAIN}${CYAN}     ║"
+        echo -e "╚════════════════════════════════════════════╝${PLAIN}"
+        echo ""
+        echo -e "  当前状态: ${tag}"
+        echo ""
+        echo -e "  ${GREEN}${BOLD}1${PLAIN}. 安装 WxChat (nginx 原生, 无需 Docker)"
+        echo -e "  ${GREEN}${BOLD}2${PLAIN}. 更换端口"
+        echo -e "  ${GREEN}${BOLD}3${PLAIN}. 重启 WxChat"
+        echo -e "  ${GREEN}${BOLD}4${PLAIN}. 停止 WxChat"
+        echo -e "  ${GREEN}${BOLD}5${PLAIN}. 卸载 WxChat"
+        echo -e "  ${GREEN}${BOLD}6${PLAIN}. 查看运行状态 / 公网IP"
+        echo -e "  ${GREEN}${BOLD}7${PLAIN}. 查看实时日志"
+        echo -e "  ${RED}${BOLD}0${PLAIN}. 返回上级菜单"
+        echo ""
+        line
+        read -rp "请输入选项 [0-7]: " sub
+        case "$sub" in
+            1) wx_install;     pause_back ;;
+            2) wx_change_port; pause_back ;;
+            3) wx_restart;     pause_back ;;
+            4) wx_stop;        pause_back ;;
+            5) wx_uninstall;   pause_back ;;
+            6) wx_status;      pause_back ;;
             7) wx_logs ;;
             0) return 0 ;;
             *) warn "无效选项, 请重新输入"; sleep 1 ;;
@@ -360,7 +644,7 @@ wx_menu() {
 }
 
 # ============================================================
-#  第二部分: frps 服务端 (frp 内网穿透)
+#  第三部分: frps 服务端 (frp 内网穿透)
 # ============================================================
 
 FRPS_INSTALL_DIR="/usr/local/frp"
@@ -612,11 +896,17 @@ frps_menu() {
 # ============================================================
 
 show_main_menu() {
+    local wxd_tag="  ${RED}[未安装]${PLAIN}"
     local wx_tag="  ${RED}[未安装]${PLAIN}"
     local frps_tag="  ${RED}[未安装]${PLAIN}"
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "wxchat"; then
+    if wxd_running; then
+        wxd_tag="  ${GREEN}[运行中]${PLAIN}"
+    elif wxd_installed; then
+        wxd_tag="  ${YELLOW}[已停止]${PLAIN}"
+    fi
+    if wx_running; then
         wx_tag="  ${GREEN}[运行中]${PLAIN}"
-    elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "wxchat"; then
+    elif wx_installed; then
         wx_tag="  ${YELLOW}[已停止]${PLAIN}"
     fi
     if systemctl is-active --quiet frps 2>/dev/null; then
@@ -629,12 +919,13 @@ show_main_menu() {
     echo -e "║      ${BOLD}ziyong 自用 VPS 服务 一键管理脚本${PLAIN}${CYAN}      ║"
     echo -e "╚════════════════════════════════════════════╝${PLAIN}"
     echo ""
-    echo -e "  ${GREEN}${BOLD}1${PLAIN}. WxChat 微信通知转发代理 (Docker)${wx_tag}"
-    echo -e "  ${GREEN}${BOLD}2${PLAIN}. frps 服务端 (frp 内网穿透)${frps_tag}"
+    echo -e "  ${GREEN}${BOLD}1${PLAIN}. WxChat 微信通知转发代理 (Docker 版)${wxd_tag}"
+    echo -e "  ${GREEN}${BOLD}2${PLAIN}. WxChat 微信通知转发代理 (nginx 版)${wx_tag}"
+    echo -e "  ${GREEN}${BOLD}3${PLAIN}. frps 服务端 (frp 内网穿透)${frps_tag}"
     echo -e "  ${RED}${BOLD}0${PLAIN}. 退出"
     echo ""
     line
-    read -rp "请选择要管理的服务 [0-2]: " main_choice
+    read -rp "请选择要管理的服务 [0-3]: " main_choice
 }
 
 main() {
@@ -642,8 +933,9 @@ main() {
     while true; do
         show_main_menu
         case "$main_choice" in
-            1) wx_menu ;;
-            2) frps_menu ;;
+            1) wxd_menu ;;
+            2) wx_menu ;;
+            3) frps_menu ;;
             0) info "再见!"; exit 0 ;;
             *) warn "无效选项, 请重新输入"; sleep 1 ;;
         esac
