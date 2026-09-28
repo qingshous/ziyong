@@ -23,7 +23,7 @@
 
 set -o pipefail
 
-VERSION="1.3.1"
+VERSION="1.3.2"
 
 # ================= 通用基础 =================
 
@@ -1241,8 +1241,9 @@ show_main_menu() {
     fi
     clear
     echo -e "${CYAN}╔════════════════════════════════════════════╗"
-    echo -e "║      ${BOLD}ziyong 自用 VPS 服务 一键管理脚本${PLAIN}${CYAN}      ║"
+    echo -e "║         ${BOLD}Slib 自用 VPS 服务管理脚本${PLAIN}${CYAN}         ║"
     echo -e "╚════════════════════════════════════════════╝${PLAIN}"
+    echo -e "  ${CYAN}快捷命令: slib    版本: v${VERSION}${PLAIN}"
     echo ""
     echo -e "  ${GREEN}${BOLD}1${PLAIN}. WxChat 微信通知转发代理 (Docker 版)${wxd_tag}"
     echo -e "  ${GREEN}${BOLD}2${PLAIN}. WxChat 微信通知转发代理 (nginx 版)${wx_tag}"

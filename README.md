@@ -1,4 +1,4 @@
-# ziyong - 自用 VPS 脚本合集
+# Slib 自用 VPS 脚本合集
 
 自用 VPS 一键安装管理脚本。单脚本、SSH 可视化菜单，主菜单选择服务，子菜单管理安装/更新/启停/卸载/日志。
 
@@ -39,8 +39,9 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 
 ```
 ╔════════════════════════════════════════════╗
-║      ziyong 自用 VPS 服务 一键管理脚本      ║
+║         Slib 自用 VPS 服务管理脚本         ║
 ╚════════════════════════════════════════════╝
+  快捷命令: slib    版本: v1.3.2
 
   1. WxChat 微信通知转发代理 (Docker 版)
   2. WxChat 微信通知转发代理 (nginx 版)
