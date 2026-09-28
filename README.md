@@ -16,10 +16,14 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 
 ## 脚本特性
 
-- **端口默认随机**：安装时端口直接回车 = 自动分配 20000-59999 之间的随机空闲端口（避开占用），也可以手动指定
-- **回车/空格即确认**：所有 y/n 交互默认 Y（如卸载确认），回车或空格就是确认，只有输 `n` 才取消
+- **端口默认随机 + 合法性校验**：安装时端口直接回车 = 自动分配 20000-59999 之间的随机空闲端口（避开占用），手动输入会校验 1-65535，非法端口要求重输
+- **NAT 网络自动检测**：检测到 NAT 网络（公网 IP ≠ 本机 IP）时，安装会提醒填写服务商分配的映射端口——NAT 机上随机端口外网无法访问
+- **回车即确认**：所有 y/n 交互默认 Y（如卸载确认），回车就是确认，输 `n` 取消；误触空格等无效输入会重新询问，不会误确认
 - **slib 快捷命令**：首次运行脚本后自动创建，以后在任意位置输入 `slib` 直接打开管理菜单（脚本更新时重跑一次即可刷新缓存）
+- **脚本自更新**：主菜单选 4 即可从 GitHub 拉取最新版（对比版本号、语法校验后更新，带加速回退）
 - **配置持久化**：安装信息保存在 `/etc/ziyong/`，重跑脚本不会丢失自定义端口
+- **兼容无 systemd 的 NAT 机**：nginx / frps 在无 systemd 环境自动切 nohup + pidfile 后台模式
+- **状态判定真实可靠**：运行状态以端口真实响应为准（纯 bash 探测），不依赖 pgrep/ss/curl，低配最小化系统不误报
 - **防火墙自动放行**：检测到 ufw / firewalld 开启时自动放行所需端口（云厂商安全组仍需手动放行）
 - **状态一目了然**：主菜单和子菜单实时显示每个服务的 `[运行中]` / `[已停止]` / `[未安装]` 状态
 
@@ -29,7 +33,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 |------|------|
 | **1. WxChat（Docker 版）** | 微信通知转发代理，官方镜像 `ddsderek/wxchat` 一键部署 |
 | **2. WxChat（nginx 版）** | 同等功能的 nginx 原生实现，**无需 Docker**，低配 NAT 机也能跑 |
-| **3. frps** | frp 服务端（fatedier/frp 官方二进制 + systemd），内网穿透 |
+| **3. frps** | frp 服务端（fatedier/frp 官方二进制），内网穿透，装完直接打印 frpc 客户端配置示例 |
 
 两个版本的 WxChat 功能完全等价（都是反代企业微信 API），可任选其一安装，也可共存（不同端口）。
 
@@ -41,6 +45,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
   1. WxChat 微信通知转发代理 (Docker 版)
   2. WxChat 微信通知转发代理 (nginx 版)
   3. frps 服务端 (frp 内网穿透)
+  4. 更新脚本自身
   0. 退出
 ```
 

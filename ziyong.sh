@@ -10,14 +10,20 @@
 #    2. WxChat (nginx 版)    nginx 原生反代, 无需Docker, 兼容低配NAT机
 #    3. frps                 frp 服务端 (官方二进制 + systemd)
 #  特性:
-#    - 端口默认随机分配(自动避开占用), 回车即可
-#    - y/n 交互默认 Y, 回车或空格=是
+#    - 端口默认随机分配(自动避开占用), 回车即可, 输入有合法性校验
+#    - NAT 网络自动检测, 提醒使用服务商映射端口
+#    - y/n 交互默认 Y, 回车=默认, 误触空格等无效输入会重新询问
 #    - 安装信息持久化 (/etc/ziyong/), 重跑脚本不丢配置
+#    - 兼容无 systemd 的 NAT 机 (nginx/frps 自动切 nohup 模式)
+#    - 运行状态以端口真实响应为准, 不依赖 pgrep/ss/curl
 #    - 自动检测 ufw/firewalld 并放行端口
 #    - 快捷命令: 首次运行后任意位置输入 slib 打开本脚本
+#    - 主菜单可一键自更新 (对比 VERSION)
 # ============================================================
 
 set -o pipefail
+
+VERSION="1.3.1"
 
 # ================= 通用基础 =================
 
@@ -40,22 +46,22 @@ err()  { echo -e "${RED}[错误]${PLAIN} $*"; }
 pause_back() { read -rp "按回车返回菜单..." _; }
 
 # ask_yn "提示文字" [默认Y|N]  -> 返回0=是
-# 默认Y时: 回车或空格都=是, 只有输入 n 才是否
+# 只有回车才走默认值, 空格/乱输入视为无效重新询问 (防误触确认)
 ask_yn() {
     local prompt="$1" def="${2:-Y}" ans
-    if [ "$def" = "Y" ]; then
-        read -rp "${prompt} [回车/空格=是, n=否]: " ans
-        case "$(echo "$ans" | tr -d ' \t')" in
-            n|N|no|NO|No|nO) return 1 ;;
-            *) return 0 ;;
+    while :; do
+        if [ "$def" = "Y" ]; then
+            read -rp "${prompt} [回车=是, n=否]: " ans
+        else
+            read -rp "${prompt} [y=是, 回车=否]: " ans
+        fi
+        case "$ans" in
+            "")                 [ "$def" = "Y" ] && return 0 || return 1 ;;
+            y|Y|yes|YES|Yes)    return 0 ;;
+            n|N|no|NO|No)       return 1 ;;
+            *) echo -e "${YELLOW}[注意]${PLAIN} 无效输入, 请输 y 或 n (回车=默认)" ;;
         esac
-    else
-        read -rp "${prompt} [y=是, 回车/空格=否]: " ans
-        case "$(echo "$ans" | tr -d ' \t')" in
-            y|Y|yes|YES|Yes|yEs|yES|YeS|yeS) return 0 ;;
-            *) return 1 ;;
-        esac
-    fi
+    done
 }
 
 check_root() {
@@ -100,6 +106,50 @@ random_free_port() {
             echo "$port"; return
         fi
     done
+}
+
+# 端口合法性校验 (1-65535 纯数字)
+is_valid_port() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+# ask_port "提示" 默认值 [allow_zero] -> 输出合法端口 (空输入=默认值, 非法重输)
+# 注意: 函数内所有提示必须走 >&2, 否则会被 $( ) 捕获
+ask_port() {
+    local prompt="$1" def="$2" allow_zero="${3:-no}" p
+    while :; do
+        read -rp "${prompt} [直接回车=${def}]: " p
+        p="${p:-$def}"
+        if is_valid_port "$p" || { [ "$allow_zero" = "yes" ] && [ "$p" = "0" ]; }; then
+            echo "$p"; return
+        fi
+        echo -e "${YELLOW}[注意]${PLAIN} 端口无效: ${p} (应为 1-65535 的数字)" >&2
+    done
+}
+
+# NAT 网络检测 (公网IP != 本机IP), 结果缓存
+# NAT 机只有服务商面板映射的端口能从外网访问, 随机端口无效
+NAT_CACHE=""
+is_nat() {
+    [ -n "$NAT_CACHE" ] && return "$NAT_CACHE"
+    local pub local_ip
+    pub=$(get_pub_ip)
+    local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    if [ "$pub" = "获取失败" ] || [ -z "$local_ip" ] || [ "$pub" = "$local_ip" ]; then
+        NAT_CACHE=1
+    else
+        NAT_CACHE=0
+    fi
+    return "$NAT_CACHE"
+}
+
+# NAT 环境端口提醒 (安装时调用, 交互场景直接用, 不走 $( ))
+nat_port_hint() {
+    if is_nat; then
+        warn "检测到本机是 NAT 网络: 随机端口外网无法访问!"
+        warn "请填写服务商后台分配给你的【映射端口】, 不确定就去服务商面板查"
+    fi
 }
 
 detect_arch() {
@@ -227,11 +277,9 @@ wxd_install() {
     if wx_installed; then
         warn "提示: nginx 版 WxChat 也在这台机器上, 注意两个版本用不同端口"
     fi
-    local random_port input_port
-    random_port=$(random_free_port)
     echo ""
-    read -rp "请输入宿主机端口 [直接回车=随机空闲端口 ${random_port}]: " input_port
-    WXD_PORT="${input_port:-$random_port}"
+    nat_port_hint
+    WXD_PORT=$(ask_port "请输入宿主机端口" "$(random_free_port)")
 
     if wxd_installed; then
         warn "检测到已存在的 ${WXD_NAME} 容器, 先删除旧容器..."
@@ -260,6 +308,7 @@ wxd_install() {
     echo -e "  ${BOLD}通知代理:${PLAIN} http://${pub_ip}:${WXD_PORT} (同地址)"
     echo ""
     warn "重要: 请到 企业微信后台 -> 应用 -> 可信IP, 填入: ${YELLOW}${BOLD}${pub_ip}${PLAIN}"
+    is_nat && warn "NAT 机注意: 请确认端口 ${WXD_PORT} 已在服务商面板做映射, 否则外网访问不到"
     line
 }
 
@@ -534,11 +583,9 @@ wx_install() {
         warn "提示: Docker 版 WxChat 也在这台机器上, 注意两个版本用不同端口"
     fi
     wx_install_nginx || return 1
-    local random_port input_port
-    random_port=$(random_free_port)
     echo ""
-    read -rp "请输入监听端口 [直接回车=随机空闲端口 ${random_port}]: " input_port
-    WX_PORT="${input_port:-$random_port}"
+    nat_port_hint
+    WX_PORT=$(ask_port "请输入监听端口" "$(random_free_port)")
 
     wx_write_webpage
     wx_write_config
@@ -564,6 +611,7 @@ wx_install() {
     echo -e "  ${BOLD}通知代理:${PLAIN} http://${pub_ip}:${WX_PORT} (同地址)"
     echo ""
     warn "重要: 请到 企业微信后台 -> 应用 -> 可信IP, 填入: ${YELLOW}${BOLD}${pub_ip}${PLAIN}"
+    is_nat && warn "NAT 机注意: 请确认端口 ${WX_PORT} 已在服务商面板做映射, 否则外网访问不到"
     line
 }
 
@@ -574,10 +622,8 @@ wx_change_port() {
         return 1
     fi
     load_wx_conf
-    local random_port input_port
-    random_port=$(random_free_port)
-    read -rp "新端口 (当前 ${WX_PORT}) [直接回车=随机空闲端口 ${random_port}]: " input_port
-    WX_PORT="${input_port:-$random_port}"
+    nat_port_hint
+    WX_PORT=$(ask_port "新端口 (当前 ${WX_PORT})" "$(random_free_port)")
     wx_write_config
     nginx -t 2>/dev/null || { err "nginx 配置测试失败"; return 1; }
     nginx_ctl reload || { err "nginx 重载失败"; return 1; }
@@ -786,6 +832,8 @@ frps_ctl() {
     case "$action" in
         enable|start)
             frps_proc_alive && return 0
+            # 日志超 10MB 截断, 防 nohup 模式撑爆磁盘
+            [ -f "$FRPS_LOG_FILE" ] && [ "$(stat -c%s "$FRPS_LOG_FILE" 2>/dev/null || echo 0)" -gt 10485760 ] && : > "$FRPS_LOG_FILE"
             nohup "$FRPS_BIN" -c "$FRPS_CONF_FILE" >>"$FRPS_LOG_FILE" 2>&1 &
             echo $! > "$FRPS_PID_FILE"
             sleep 1
@@ -845,10 +893,12 @@ frps_install() {
         mkdir -p "$ZIYONG_DIR"
         cp -f "$FRPS_CONF_FILE" "$FRPS_CONF_BAK" 2>/dev/null
     fi
-    read -rp "frp 通信端口 [直接回车=随机空闲端口 ${r1}]: " p1;        [ -n "$p1" ] && BIND_PORT="$p1" || BIND_PORT="$r1"
-    read -rp "面板端口, 0不开 [直接回车=随机空闲端口 ${r2}]: " p2;      [ -n "$p2" ] && DASHBOARD_PORT="$p2" || DASHBOARD_PORT="$r2"
-    read -rp "http穿透端口, 0不启用 [直接回车=随机空闲端口 ${r3}]: " p3;  [ -n "$p3" ] && VHOST_HTTP_PORT="$p3" || VHOST_HTTP_PORT="$r3"
-    read -rp "https穿透端口, 0不启用 [直接回车=随机空闲端口 ${r4}]: " p4; [ -n "$p4" ] && VHOST_HTTPS_PORT="$p4" || VHOST_HTTPS_PORT="$r4"
+    echo ""
+    nat_port_hint
+    BIND_PORT=$(ask_port "frp 通信端口" "$r1")
+    DASHBOARD_PORT=$(ask_port "面板端口, 0不开" "$r2" yes)
+    VHOST_HTTP_PORT=$(ask_port "http穿透端口, 0不启用" "$r3" yes)
+    VHOST_HTTPS_PORT=$(ask_port "https穿透端口, 0不启用" "$r4" yes)
 
     local ver arch url tmp
     ver=$(get_latest_version)
@@ -933,6 +983,25 @@ EOF
     [ "$VHOST_HTTPS_PORT" != "0" ] && echo -e "  ${BOLD}https穿透端口:${PLAIN} ${VHOST_HTTPS_PORT}"
     echo ""
     warn "配置文件: ${FRPS_CONF_FILE}   客户端 frpc.toml 需填同一 token"
+    if is_nat; then
+        warn "NAT 机注意: bindPort 和每个 proxy 的 remotePort 都必须是服务商已映射的端口"
+    fi
+    echo ""
+    info "frpc 客户端配置示例 (复制到客户端 frpc.toml 按需修改):"
+    echo -e "${CYAN}"
+    cat <<EOF
+serverAddr = "${pub_ip}"
+serverPort = ${BIND_PORT}
+auth.token = "${token}"
+
+[[proxies]]
+name = "ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = 换一个映射端口
+EOF
+    echo -e "${PLAIN}"
     line
 }
 
@@ -1120,6 +1189,37 @@ frps_menu() {
 #  主菜单
 # ============================================================
 
+# 从 GitHub 拉取最新版脚本自更新
+self_update() {
+    local tmp="/tmp/ziyong_new.$$.sh" new_ver=""
+    info "当前版本: v${VERSION}, 正在检查更新..."
+    if curl -fsSL --max-time 20 "https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh" -o "$tmp" 2>/dev/null \
+       || curl -fsSL --max-time 20 "https://ghproxy.net/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh" -o "$tmp" 2>/dev/null \
+       || curl -fsSL --max-time 20 "https://gh-proxy.com/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh" -o "$tmp" 2>/dev/null; then
+        new_ver=$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2)
+        if [ -z "$new_ver" ]; then
+            err "下载内容异常 (无版本号), 已取消更新"; rm -f "$tmp"; return 1
+        fi
+        if [ "$new_ver" = "$VERSION" ]; then
+            info "已是最新版本 v${VERSION}"; rm -f "$tmp"; return 0
+        fi
+        if ! bash -n "$tmp" 2>/dev/null; then
+            err "下载的脚本语法校验失败, 已取消更新"; rm -f "$tmp"; return 1
+        fi
+        # 更新 slib 缓存 (slib 指向这里, 下次运行即新版)
+        mkdir -p "$ZIYONG_DIR"
+        cp -f "$tmp" "$CACHE_SCRIPT" 2>/dev/null
+        # 文件方式运行时同时覆盖脚本本体
+        [ -f "${BASH_SOURCE[0]}" ] && cp -f "$tmp" "${BASH_SOURCE[0]}" 2>/dev/null
+        rm -f "$tmp"
+        info "更新完成: v${VERSION} -> v${new_ver}"
+        warn "请退出后重新运行 slib (或重跑本脚本) 使新版生效"
+    else
+        err "下载失败, 请检查网络后重试"
+        return 1
+    fi
+}
+
 show_main_menu() {
     local wxd_tag="  ${RED}[未安装]${PLAIN}"
     local wx_tag="  ${RED}[未安装]${PLAIN}"
@@ -1147,10 +1247,11 @@ show_main_menu() {
     echo -e "  ${GREEN}${BOLD}1${PLAIN}. WxChat 微信通知转发代理 (Docker 版)${wxd_tag}"
     echo -e "  ${GREEN}${BOLD}2${PLAIN}. WxChat 微信通知转发代理 (nginx 版)${wx_tag}"
     echo -e "  ${GREEN}${BOLD}3${PLAIN}. frps 服务端 (frp 内网穿透)${frps_tag}"
+    echo -e "  ${GREEN}${BOLD}4${PLAIN}. 更新脚本自身 (当前 v${VERSION})"
     echo -e "  ${RED}${BOLD}0${PLAIN}. 退出"
     echo ""
     line
-    read -rp "请选择要管理的服务 [0-3]: " main_choice
+    read -rp "请选择要管理的服务 [0-4]: " main_choice
 }
 
 main() {
@@ -1161,6 +1262,7 @@ main() {
             1) wxd_menu ;;
             2) wx_menu ;;
             3) frps_menu ;;
+            4) self_update; pause_back ;;
             0) info "再见!"; exit 0 ;;
             *) warn "无效选项, 请重新输入"; sleep 1 ;;
         esac
