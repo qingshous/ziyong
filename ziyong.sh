@@ -23,7 +23,7 @@
 
 set -o pipefail
 
-VERSION="1.3.3"
+VERSION="1.3.4"
 
 # ================= 通用基础 =================
 
@@ -513,6 +513,7 @@ wx_install_nginx() {
         err "不支持的包管理器, 请手动安装 nginx 后重试"
         return 1
     fi
+    hash -r 2>/dev/null
     command -v nginx >/dev/null 2>&1 || { err "nginx 安装失败"; return 1; }
     info "nginx 安装完成"
 }
@@ -718,6 +719,8 @@ wx_uninstall_nginx() {
     rm -f "$(wx_conf_path)" "$(wx_conf_disabled)" 2>/dev/null
     rm -rf "$WX_WEB_DIR"
     rm -f "$WX_NGINX_CONF_PERSIST"
+    # 清 bash 命令路径缓存, 否则 command -v 会命中卸载前的旧路径误报
+    hash -r 2>/dev/null
     if ! command -v nginx >/dev/null 2>&1; then
         info "nginx 已卸载 (配置文件目录 /etc/nginx 如无用可手动删除)"
     else
