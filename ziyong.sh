@@ -382,23 +382,52 @@ wx_conf_path()     { echo "$(wx_nginx_dir)/${WX_NGINX_CONF_NAME}"; }
 wx_conf_disabled() { echo "$(wx_nginx_dir)/${WX_NGINX_CONF_NAME}.disabled"; }
 
 wx_installed() { [ -f "$(wx_conf_path)" ] || [ -f "$(wx_conf_disabled)" ]; }
-wx_running()   { pgrep -x nginx >/dev/null 2>&1 && [ -f "$(wx_conf_path)" ]; }
+
+# 端口真实探测 (权威判据, 不依赖 pgrep —— 低配 NAT 机常缺 procps)
+wx_port_alive() {
+    curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:${WX_PORT}/" 2>/dev/null && return 0
+    command -v wget >/dev/null 2>&1 && wget -q -T 2 -O /dev/null "http://127.0.0.1:${WX_PORT}/" 2>/dev/null && return 0
+    return 1
+}
+
+# nginx 进程检测 (pgrep 缺失时扫 /proc 兜底, 仅用于诊断展示)
+wx_proc_alive() {
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -x nginx >/dev/null 2>&1 && return 0
+    fi
+    grep -qs '^nginx$' /proc/[0-9]*/comm 2>/dev/null && return 0
+    return 1
+}
+
+# 运行判定 = 站点配置存在 且 端口真实响应
+wx_running() {
+    load_wx_conf
+    [ -f "$(wx_conf_path)" ] && wx_port_alive
+}
 
 # nginx 服务控制, 兼容 systemd / service / 裸进程
 nginx_ctl() {
     local action="$1"
     if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
         case "$action" in
-            enable) systemctl enable --now nginx ;;
+            enable)
+                # 注意: apt 装完 nginx 会自动启动, enable --now 不会 reload 新配置
+                # 所以已在跑就 reload, 没在跑才 start
+                systemctl enable nginx >/dev/null 2>&1
+                if systemctl is-active --quiet nginx; then
+                    systemctl reload nginx 2>/dev/null || systemctl restart nginx
+                else
+                    systemctl start nginx
+                fi
+                ;;
             reload) systemctl reload nginx 2>/dev/null || systemctl restart nginx ;;
             *)      systemctl "$action" nginx ;;
         esac
     else
         case "$action" in
-            enable|start) nginx ;;
-            reload)       nginx -s reload ;;
-            stop)         nginx -s quit ;;
-            restart)      nginx -s quit 2>/dev/null; sleep 1; nginx ;;
+            enable|start|reload) nginx -s reload 2>/dev/null || nginx ;;
+            stop)                nginx -s quit ;;
+            restart)             nginx -s quit 2>/dev/null; sleep 1; nginx ;;
         esac
     fi
 }
@@ -505,6 +534,12 @@ wx_install() {
     nginx_ctl enable || { err "nginx 启动失败"; return 1; }
 
     save_wx_conf
+    sleep 1
+    if ! wx_running; then
+        err "nginx 已启动但端口 ${WX_PORT} 无响应"
+        warn "请执行 tail -50 /var/log/nginx/error.log 查看原因, 然后回菜单选 3 重启"
+        return 1
+    fi
     open_firewall_ports "$WX_PORT"
 
     local pub_ip
@@ -534,8 +569,14 @@ wx_change_port() {
     nginx -t 2>/dev/null || { err "nginx 配置测试失败"; return 1; }
     nginx_ctl reload || { err "nginx 重载失败"; return 1; }
     save_wx_conf
+    sleep 1
+    if wx_running; then
+        info "端口已更换为 ${WX_PORT} 并生效"
+    else
+        err "重载后端口 ${WX_PORT} 无响应, 请执行 tail -50 /var/log/nginx/error.log 排查"
+        return 1
+    fi
     open_firewall_ports "$WX_PORT"
-    info "端口已更换为 ${WX_PORT} 并生效"
 }
 
 wx_restart() {
@@ -545,7 +586,15 @@ wx_restart() {
     fi
     # 若处于停止状态(配置被禁用)先恢复
     [ -f "$(wx_conf_disabled)" ] && mv "$(wx_conf_disabled)" "$(wx_conf_path)"
-    nginx_ctl restart && info "WxChat 已重启" || err "重启失败"
+    nginx_ctl restart || { err "重启命令执行失败"; return 1; }
+    sleep 1
+    load_wx_conf
+    if wx_running; then
+        info "WxChat 已重启 (端口 ${WX_PORT} 响应正常)"
+    else
+        err "重启后端口 ${WX_PORT} 无响应, 请执行 tail -50 /var/log/nginx/error.log 排查"
+        return 1
+    fi
 }
 
 wx_stop() {
@@ -587,6 +636,23 @@ wx_status() {
             || echo -e "  ${RED}反代路径无响应${PLAIN}"
     elif wx_installed; then
         warn "运行状态: ${RED}已停止${PLAIN}"
+        echo ""
+        info "自检 (帮助定位问题):"
+        if [ -f "$(wx_conf_path)" ]; then
+            echo -e "  站点配置: ${GREEN}存在${PLAIN} ($(wx_conf_path))"
+        else
+            echo -e "  站点配置: ${RED}缺失${PLAIN} (可能被停用, 选 3 重启会自动恢复)"
+        fi
+        if wx_proc_alive; then
+            echo -e "  nginx进程: ${GREEN}运行中${PLAIN}"
+        else
+            echo -e "  nginx进程: ${RED}未运行${PLAIN} (选 3 重启)"
+        fi
+        if wx_port_alive; then
+            echo -e "  端口 ${WX_PORT}: ${GREEN}有响应${PLAIN}"
+        else
+            echo -e "  端口 ${WX_PORT}: ${RED}无响应${PLAIN} (选 3 重启; 无效则 tail -50 /var/log/nginx/error.log)"
+        fi
     else
         err "尚未安装 WxChat (nginx 版)"
         return 1
