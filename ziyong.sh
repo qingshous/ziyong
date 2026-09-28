@@ -23,7 +23,7 @@
 
 set -o pipefail
 
-VERSION="1.3.2"
+VERSION="1.3.3"
 
 # ================= 通用基础 =================
 
@@ -677,9 +677,52 @@ wx_uninstall() {
         rm -rf "$WX_WEB_DIR"
         rm -f "$WX_NGINX_CONF_PERSIST"
         nginx_ctl reload 2>/dev/null
-        info "WxChat (nginx 版) 已卸载 (nginx 保留, 如需卸载请执行: apt/dnf/yum/apk remove nginx)"
+        info "WxChat (nginx 版) 已卸载 (nginx 保留, 如需连软件包一起删请选菜单 8)"
     else
         info "已取消"
+    fi
+}
+
+# 卸载 nginx 本体 (软件包), 同时清掉 WxChat 站点残留
+wx_uninstall_nginx() {
+    check_root
+    if ! command -v nginx >/dev/null 2>&1 && [ ! -d /etc/nginx ]; then
+        err "未检测到 nginx, 无需卸载"
+        return 1
+    fi
+    warn "将停止并卸载 nginx 软件包, 本机上所有依赖 nginx 的站点都会失效!"
+    if wx_installed; then
+        warn "WxChat 站点配置也会一并清除"
+    fi
+    if ! ask_yn "确认卸载 nginx 本体?" "Y"; then
+        info "已取消"
+        return 0
+    fi
+    # 先停服务
+    nginx_ctl stop 2>/dev/null
+    has_systemd && systemctl disable nginx >/dev/null 2>&1
+    # 按包管理器卸载
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get remove -y nginx nginx-common >/dev/null 2>&1 || apt-get remove -y nginx
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf remove -y nginx
+    elif command -v yum >/dev/null 2>&1; then
+        yum remove -y nginx
+    elif command -v apk >/dev/null 2>&1; then
+        apk del nginx
+    else
+        err "未识别的包管理器, 请手动卸载 nginx"
+        return 1
+    fi
+    # 清理 WxChat 残留 (站点配置/欢迎页/持久化端口)
+    rm -f "$(wx_conf_path)" "$(wx_conf_disabled)" 2>/dev/null
+    rm -rf "$WX_WEB_DIR"
+    rm -f "$WX_NGINX_CONF_PERSIST"
+    if ! command -v nginx >/dev/null 2>&1; then
+        info "nginx 已卸载 (配置文件目录 /etc/nginx 如无用可手动删除)"
+    else
+        err "nginx 卸载可能未完成, 请手动检查"
+        return 1
     fi
 }
 
@@ -750,18 +793,20 @@ wx_menu() {
         echo -e "  ${GREEN}${BOLD}5${PLAIN}. 卸载 WxChat"
         echo -e "  ${GREEN}${BOLD}6${PLAIN}. 查看运行状态 / 公网IP"
         echo -e "  ${GREEN}${BOLD}7${PLAIN}. 查看实时日志"
+        echo -e "  ${GREEN}${BOLD}8${PLAIN}. 卸载 nginx 本体 (连软件包一起删)"
         echo -e "  ${RED}${BOLD}0${PLAIN}. 返回上级菜单"
         echo ""
         line
-        read -rp "请输入选项 [0-7]: " sub
+        read -rp "请输入选项 [0-8]: " sub
         case "$sub" in
-            1) wx_install;     pause_back ;;
-            2) wx_change_port; pause_back ;;
-            3) wx_restart;     pause_back ;;
-            4) wx_stop;        pause_back ;;
-            5) wx_uninstall;   pause_back ;;
-            6) wx_status;      pause_back ;;
+            1) wx_install;         pause_back ;;
+            2) wx_change_port;     pause_back ;;
+            3) wx_restart;         pause_back ;;
+            4) wx_stop;            pause_back ;;
+            5) wx_uninstall;       pause_back ;;
+            6) wx_status;          pause_back ;;
             7) wx_logs ;;
+            8) wx_uninstall_nginx; pause_back ;;
             0) return 0 ;;
             *) warn "无效选项, 请重新输入"; sleep 1 ;;
         esac

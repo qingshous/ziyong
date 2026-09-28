@@ -70,7 +70,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 
 官方镜像 `ddsderek/wxchat` 的本质就是 nginx 反代企业微信 API，本脚本直接以 **nginx 原生方式**实现同等功能——**无需 Docker**，纯 nginx 进程内存占用仅几 MB，兼容无法跑 Docker 的低配 NAT 机。
 
-**子菜单**：安装 / 更换端口 / 重启 / 停止 / 卸载 / 状态+公网IP / 实时日志
+**子菜单**：安装 / 更换端口 / 重启 / 停止 / 卸载 / 状态+公网IP / 实时日志 / 卸载 nginx 本体
 
 **兼容性**：
 
