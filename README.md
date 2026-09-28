@@ -86,7 +86,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 
 ## 3. frps 服务端（frp 内网穿透）
 
-从 GitHub 下载 [fatedier/frp](https://github.com/fatedier/frp) 官方二进制安装，systemd 托管（开机自启、异常 5 秒自动拉起）。下载失败自动走 ghproxy.net / gh-proxy.com 加速回退。
+从 GitHub 下载 [fatedier/frp](https://github.com/fatedier/frp) 官方二进制安装。下载失败自动走 ghproxy.net / gh-proxy.com 加速回退。**兼容无 systemd 的 NAT 机**：有 systemd 走 service 托管（开机自启、异常 5 秒自动拉起）；无 systemd 自动切 nohup + pidfile 后台模式，并尽力用 crontab @reboot 设置开机自启。运行状态以 bindPort 真实可连接为准（纯 bash 探测，不依赖 pgrep/ss/curl）。
 
 **子菜单**：安装 / 更新 / 重启 / 启动 / 停止 / 卸载 / 状态+配置+公网IP / 日志 / 查看 token / 编辑配置
 

@@ -82,12 +82,21 @@ gen_token() {
     fi
 }
 
+# 是否有可用 systemd (NAT 机/容器常没有)
+has_systemd() { command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; }
+
+# 通用 TCP 端口探测 (纯 bash /dev/tcp, 不依赖 ss/netstat/curl —— 低配机这些可能全缺)
+tcp_port_alive() {
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; }
+    return 1
+}
+
 # 随机取一个 20000-59999 的空闲 TCP 端口 (避开系统保留/常用段)
 random_free_port() {
     local port
     while :; do
         port=$(( (RANDOM * 32768 + RANDOM) % 40000 + 20000 ))
-        if ! (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q ":${port} "; then
+        if ! tcp_port_alive "$port" && ! (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q ":${port} "; then
             echo "$port"; return
         fi
     done
@@ -143,6 +152,10 @@ install_docker() {
     if command -v docker >/dev/null 2>&1; then
         info "Docker 已安装: $(docker -v)"
         return 0
+    fi
+    if ! has_systemd; then
+        err "本机无 systemd, Docker 版不适用; 请返回主菜单选 2 (nginx 版, 无需 Docker)"
+        return 1
     fi
     warn "未检测到 Docker, 开始自动安装..."
     if curl -fsSL --max-time 20 https://get.docker.com -o /tmp/get-docker.sh 2>/dev/null; then
@@ -720,8 +733,107 @@ FRPS_BIN="${FRPS_INSTALL_DIR}/frps"
 FRPS_SERVICE="/etc/systemd/system/frps.service"
 FRPS_CONF_BAK="${ZIYONG_DIR}/frps.toml.bak"
 
+FRPS_PID_FILE="/run/frps.pid"
+FRPS_LOG_FILE="/var/log/frps.log"
+
 frps_installed() { [ -f "$FRPS_BIN" ]; }
-frps_running()   { systemctl is-active --quiet frps 2>/dev/null; }
+
+# 从配置解析 bindPort
+frps_bind_port() { grep -m1 -oE '^bindPort *= *[0-9]+' "$FRPS_CONF_FILE" 2>/dev/null | grep -oE '[0-9]+$'; }
+
+# frps 进程检测 (pgrep -> /proc 扫描 -> pidfile 三级兜底)
+frps_proc_alive() {
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -x frps >/dev/null 2>&1 && return 0
+    fi
+    grep -qs '^frps$' /proc/[0-9]*/comm 2>/dev/null && return 0
+    [ -f "$FRPS_PID_FILE" ] && kill -0 "$(cat "$FRPS_PID_FILE" 2>/dev/null)" 2>/dev/null && return 0
+    return 1
+}
+
+# 运行判定 = bindPort 真实可连接 (权威), 解析不到端口时退化为进程检测
+frps_running() {
+    frps_installed || return 1
+    local bp
+    bp=$(frps_bind_port)
+    if [ -n "$bp" ]; then
+        tcp_port_alive "$bp" && return 0
+    fi
+    frps_proc_alive
+}
+
+# 无 systemd 时杀掉全部 frps 进程
+frps_kill_all() {
+    [ -f "$FRPS_PID_FILE" ] && kill "$(cat "$FRPS_PID_FILE" 2>/dev/null)" 2>/dev/null
+    command -v pkill >/dev/null 2>&1 && pkill -x frps 2>/dev/null
+    local pid
+    for pid in $(grep -ls '^frps$' /proc/[0-9]*/comm 2>/dev/null | cut -d/ -f3); do
+        kill "$pid" 2>/dev/null
+    done
+}
+
+# frps 服务控制, 双通道: systemd / nohup+pidfile (NAT 机无 systemd)
+frps_ctl() {
+    local action="$1"
+    if has_systemd; then
+        case "$action" in
+            enable)  systemctl enable --now frps ;;
+            disable) systemctl disable --now frps ;;
+            *)       systemctl "$action" frps ;;
+        esac
+        return
+    fi
+    case "$action" in
+        enable|start)
+            frps_proc_alive && return 0
+            nohup "$FRPS_BIN" -c "$FRPS_CONF_FILE" >>"$FRPS_LOG_FILE" 2>&1 &
+            echo $! > "$FRPS_PID_FILE"
+            sleep 1
+            frps_proc_alive
+            ;;
+        stop)
+            frps_kill_all
+            rm -f "$FRPS_PID_FILE"
+            sleep 1
+            ! frps_proc_alive
+            ;;
+        restart)
+            frps_ctl stop >/dev/null 2>&1
+            sleep 1
+            frps_ctl start
+            ;;
+        disable)
+            frps_ctl stop
+            ;;
+    esac
+}
+
+# 无 systemd 时尽力设置开机自启 (crontab @reboot)
+frps_setup_autostart() {
+    has_systemd && return 0
+    if command -v crontab >/dev/null 2>&1; then
+        ( crontab -l 2>/dev/null | grep -v 'ziyong-frps'; echo "@reboot ${FRPS_BIN} -c ${FRPS_CONF_FILE} >>${FRPS_LOG_FILE} 2>&1 &  # ziyong-frps" ) | crontab - \
+            && { info "已通过 crontab @reboot 设置开机自启"; return 0; }
+    fi
+    warn "无 systemd 且未找到 crontab, 无法设置开机自启; 机器重启后需手动执行:"
+    echo "    nohup ${FRPS_BIN} -c ${FRPS_CONF_FILE} >>${FRPS_LOG_FILE} 2>&1 &"
+}
+
+# 清理开机自启 (卸载时)
+frps_remove_autostart() {
+    has_systemd && return 0
+    command -v crontab >/dev/null 2>&1 && ( crontab -l 2>/dev/null | grep -v 'ziyong-frps' ) | crontab - 2>/dev/null
+    return 0
+}
+
+# 日志查看方式提示 (按环境)
+frps_log_hint() {
+    if has_systemd; then
+        echo "journalctl -u frps -e"
+    else
+        echo "tail -50 ${FRPS_LOG_FILE}"
+    fi
+}
 
 frps_install() {
     check_root
@@ -774,7 +886,8 @@ webServer.password = \"${dashboard_pwd}\""
         [ -n "$dashboard_block" ] && echo "$dashboard_block"
     } > "$FRPS_CONF_FILE"
 
-    cat > "$FRPS_SERVICE" <<EOF
+    if has_systemd; then
+        cat > "$FRPS_SERVICE" <<EOF
 [Unit]
 Description=frps service (frp server)
 After=network.target
@@ -789,10 +902,20 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+        systemctl daemon-reload
+    else
+        warn "未检测到 systemd, 使用 nohup 后台模式运行 (日志: ${FRPS_LOG_FILE})"
+    fi
 
-    systemctl daemon-reload
-    systemctl enable --now frps || { err "服务启动失败, 请查看: journalctl -u frps -e"; return 1; }
+    # 重装场景: 先停掉可能还在跑旧配置的进程
+    frps_ctl stop >/dev/null 2>&1
+    frps_ctl enable || { err "服务启动失败, 请查看: $(frps_log_hint)"; return 1; }
     sleep 1
+    if ! frps_running; then
+        err "启动后端口 ${BIND_PORT} 无响应, 请查看: $(frps_log_hint)"
+        return 1
+    fi
+    frps_setup_autostart
 
     open_firewall_ports "$BIND_PORT" "$DASHBOARD_PORT" "$VHOST_HTTP_PORT" "$VHOST_HTTPS_PORT"
 
@@ -828,16 +951,27 @@ frps_update() {
     tmp=$(mktemp -d)
     download "$url" "${tmp}/frp.tar.gz" || { err "下载失败"; rm -rf "$tmp"; return 1; }
     tar -xzf "${tmp}/frp.tar.gz" -C "$tmp"
-    systemctl stop frps 2>/dev/null
+    frps_ctl stop >/dev/null 2>&1
     cp "${tmp}/frp_${ver}_linux_${arch}/frps" "$FRPS_BIN" && chmod +x "$FRPS_BIN"
     rm -rf "$tmp"
-    systemctl start frps
+    frps_ctl start || { err "更新后启动失败, 请查看: $(frps_log_hint)"; return 1; }
     info "更新完成, 当前版本: $("$FRPS_BIN" -v 2>/dev/null)"
 }
 
-frps_restart() { frps_installed && systemctl restart frps && info "frps 已重启" || err "尚未安装 frps"; }
-frps_start()   { frps_installed && systemctl start frps   && info "frps 已启动" || err "尚未安装 frps"; }
-frps_stop()    { frps_installed && systemctl stop frps    && info "frps 已停止" || err "尚未安装 frps"; }
+frps_restart() {
+    frps_installed || { err "尚未安装 frps"; return 1; }
+    frps_ctl restart || { err "重启失败, 请查看: $(frps_log_hint)"; return 1; }
+    sleep 1
+    frps_running && info "frps 已重启" || { err "重启后端口无响应, 请查看: $(frps_log_hint)"; return 1; }
+}
+frps_start() {
+    frps_installed || { err "尚未安装 frps"; return 1; }
+    frps_ctl start && info "frps 已启动" || { err "启动失败, 请查看: $(frps_log_hint)"; return 1; }
+}
+frps_stop() {
+    frps_installed || { err "尚未安装 frps"; return 1; }
+    frps_ctl stop && info "frps 已停止" || err "停止失败"
+}
 
 frps_uninstall() {
     check_root
@@ -846,9 +980,10 @@ frps_uninstall() {
         return 1
     fi
     if ask_yn "确认卸载 frps? 配置和 token 将被删除" "Y"; then
-        systemctl disable --now frps >/dev/null 2>&1
-        rm -f "$FRPS_SERVICE" "$FRPS_BIN" "$FRPS_CONF_FILE" "$FRPS_CONF_BAK"
-        systemctl daemon-reload
+        frps_ctl disable >/dev/null 2>&1
+        frps_remove_autostart
+        rm -f "$FRPS_SERVICE" "$FRPS_BIN" "$FRPS_CONF_FILE" "$FRPS_CONF_BAK" "$FRPS_PID_FILE"
+        has_systemd && systemctl daemon-reload
         info "frps 已卸载"
     else
         info "已取消"
@@ -865,6 +1000,22 @@ frps_status() {
         info "运行状态: ${GREEN}运行中${PLAIN}"
     else
         warn "运行状态: ${RED}已停止${PLAIN}"
+        echo ""
+        info "自检 (帮助定位问题):"
+        if frps_proc_alive; then
+            echo -e "  frps进程: ${GREEN}运行中${PLAIN}"
+        else
+            echo -e "  frps进程: ${RED}未运行${PLAIN} (菜单选 4 启动)"
+        fi
+        local bp
+        bp=$(frps_bind_port)
+        if [ -n "$bp" ]; then
+            if tcp_port_alive "$bp"; then
+                echo -e "  通信端口 ${bp}: ${GREEN}可连接${PLAIN}"
+            else
+                echo -e "  通信端口 ${bp}: ${RED}无响应${PLAIN} (菜单选 3 重启; 无效则 $(frps_log_hint))"
+            fi
+        fi
     fi
     echo ""
     info "端口监听:"
@@ -882,12 +1033,20 @@ frps_status() {
 }
 
 frps_logs() {
-    if frps_installed; then
+    if ! frps_installed; then
+        err "尚未安装 frps"
+        return 1
+    fi
+    if has_systemd; then
         journalctl -u frps -n 50 --no-pager
         echo ""
         warn "以上为最近50行, 实时跟踪: journalctl -u frps -f"
+    elif [ -f "$FRPS_LOG_FILE" ]; then
+        tail -n 50 "$FRPS_LOG_FILE"
+        echo ""
+        warn "以上为最近50行, 实时跟踪: tail -f ${FRPS_LOG_FILE}"
     else
-        err "尚未安装 frps"
+        warn "暂无日志文件 (${FRPS_LOG_FILE} 不存在, 服务可能未以后台模式启动过)"
     fi
 }
 
@@ -908,9 +1067,9 @@ frps_edit() {
     fi
     ${EDITOR:-vi} "$FRPS_CONF_FILE"
     if ask_yn "配置已修改, 立即重启 frps?" "Y"; then
-        systemctl restart frps && info "frps 已重启"
+        frps_ctl restart && info "frps 已重启" || err "重启失败, 请查看: $(frps_log_hint)"
     else
-        info "已跳过重启, 请手动执行: systemctl restart frps"
+        info "已跳过重启, 可在菜单选 3 重启"
     fi
 }
 
@@ -975,9 +1134,9 @@ show_main_menu() {
     elif wx_installed; then
         wx_tag="  ${YELLOW}[已停止]${PLAIN}"
     fi
-    if systemctl is-active --quiet frps 2>/dev/null; then
+    if frps_running; then
         frps_tag="  ${GREEN}[运行中]${PLAIN}"
-    elif [ -f "/etc/systemd/system/frps.service" ]; then
+    elif frps_installed; then
         frps_tag="  ${YELLOW}[已停止]${PLAIN}"
     fi
     clear
