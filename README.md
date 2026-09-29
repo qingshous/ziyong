@@ -1,168 +1,62 @@
-# Slib 自用 VPS 脚本合集
+# Realm 一键安装与管理脚本（全系统兼容重构版）
 
-自用 VPS 一键安装管理脚本。单脚本、SSH 可视化菜单，主菜单选择服务，子菜单管理安装/更新/启停/卸载/日志。
+基于 playfulsoul/realm-installer 重构的 realm 端口转发一键管理脚本，修复原版兼容性与健壮性问题。
 
-## 一键使用
+## 相比原版的改进
 
-```bash
-# 海外 VPS 直连
-bash <(curl -fsSL https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh)
-```
+- **全系统兼容**：Debian / Ubuntu（apt）、CentOS（dnf/yum）、Alpine（apk）自动识别，按需安装缺失依赖
+- **三级服务托管**：systemd → OpenRC → nohup + pidfile 自动降级，无 systemd 的 NAT 机/LXC 容器也能跑（OpenRC 原生自启，nohup 模式尽力 crontab @reboot）
+- **musl libc 支持**：自动检测 glibc/musl，Alpine 直接下载官方 musl 构建，无需 gcompat（原版下的 gnu 版在 Alpine 根本跑不了）
+- **菜单循环**：原版选完一项就退出，现改为循环菜单
+- **修复服务文件冲突**：删除原版 `User=root` + `DynamicUser=true` 的矛盾组合
+- **下载校验 + 加速回退**：内核和自更新下载带 shebang/`bash -n` 校验，失败自动走 ghproxy.net / gh-proxy.com，不会写坏 `realm` 命令
+- **规则管理**：规则编号列表 + 按编号删除（原版只能追加不能删）
+- **输入校验**：端口 1-65535 校验、监听端口查重、落地地址格式校验、IPv6 自动加括号、可选双栈 `[::]` 监听
+- **卸载二次确认**；防火墙检测到啥用啥（ufw/firewalld），都没有则提示而非强装 ufw
+- **下载到临时目录**，不污染当前目录；操作后真实验证服务存活
 
-```bash
-# 国内 VPS 连不上 GitHub raw 时，套一层加速
-bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh)
-```
+## 使用
 
-## 脚本特性
-
-- **端口默认随机 + 双重校验**：安装时端口直接回车 = 自动分配 20000-59999 之间的随机空闲端口；手动输入会校验合法性和**占用情况**，被占用/非法端口要求重输（重装时自动放行服务自己正在用的旧端口）
-- **NAT 网络自动检测**：检测到 NAT 网络（公网 IP ≠ 本机 IP）时，安装会提醒填写服务商分配的映射端口——NAT 机上随机端口外网无法访问
-- **回车即确认**：所有 y/n 交互默认 Y（如卸载确认），回车就是确认，输 `n` 取消；误触空格等无效输入会重新询问，不会误确认
-- **slib 快捷命令**：首次运行脚本后自动创建，以后在任意位置输入 `slib` 直接打开管理菜单（脚本更新时重跑一次即可刷新缓存）
-- **脚本自更新/自卸载**：主菜单选 4 从 GitHub 拉取最新版（对比版本号、语法校验后更新）；选 5 清理 slib 和缓存
-- **配置持久化 + 权限收紧**：安装信息保存在 `/etc/ziyong/`（目录 700、文件 600），frps token 配置文件 600 仅 root 可读
-- **init 系统全兼容**：systemd → OpenRC（Alpine 等，自动生成 `/etc/init.d/frps` 原生托管）→ nohup + pidfile 三级降级，低配 NAT 机也能跑
-- **状态判定真实可靠**：运行状态以端口真实响应为准（纯 bash 探测），不依赖 pgrep/ss/curl，低配最小化系统不误报
-- **防火墙自动放行**：检测到 ufw / firewalld 开启时自动放行所需端口（云厂商安全组仍需手动放行）
-- **状态一目了然**：主菜单和子菜单实时显示每个服务的 `[运行中]` / `[已停止]` / `[未安装]` 状态
-
-## 包含的服务
-
-| 服务 | 用途 |
-|------|------|
-| **1. WxChat（Docker 版）** | 微信通知转发代理，官方镜像 `ddsderek/wxchat` 一键部署 |
-| **2. WxChat（nginx 版）** | 同等功能的 nginx 原生实现，**无需 Docker**，低配 NAT 机也能跑 |
-| **3. frps** | frp 服务端（fatedier/frp 官方二进制），内网穿透，装完直接打印 frpc 客户端配置示例 |
-| **4. sing-box 节点管理** | 调度入口，本体在 [qingshous/sing-box-sh](https://github.com/qingshous/sing-box-sh) 仓库独立维护（VLESS-REALITY / Hysteria2 / TUIC / AnyTLS / VLESS-Argo / Shadowsocks） |
-| **5. realm 端口转发管理** | 调度入口，本体在 [qingshous/realm-xwPF](https://github.com/qingshous/realm-xwPF) 仓库独立维护（realm 中转规则可视化管理、端口流量狗、链路测试） |
-
-两个版本的 WxChat 功能完全等价（都是反代企业微信 API），可任选其一安装，也可共存（不同端口）。
-
-```
-╔════════════════════════════════════════════╗
-║         Slib 自用 VPS 服务管理脚本         ║
-╚════════════════════════════════════════════╝
-  快捷命令: slib    版本: v1.6.0
-
-  1. WxChat 微信通知转发代理 (Docker 版)
-  2. WxChat 微信通知转发代理 (nginx 版)
-  3. frps 服务端 (frp 内网穿透)
-  4. sing-box 节点管理 (VLESS-REALITY/Hy2/TUIC等)
-  5. realm 端口转发管理 (中转/流量狗)
-  6. 更新脚本自身
-  7. 卸载脚本自身 (slib/缓存)
-  0. 退出
-```
-
----
-
-## 1. WxChat 微信通知代理（Docker 版）
-
-一键部署官方镜像 `ddsderek/wxchat:latest`，Docker 未安装时脚本自动安装（官方源失败自动切国内镜像源）。
-
-**子菜单**：安装 / 更新 / 重启 / 停止 / 卸载 / 状态+公网IP / 实时日志
-
-| 项 | 默认值 | 说明 |
-|----|--------|------|
-| 镜像 | `ddsderek/wxchat:latest` | 官方镜像 |
-| 宿主机端口 | 随机空闲端口 | 安装时可手动指定 |
-| 重启策略 | `--restart=always` | 开机自启、异常拉起 |
-
----
-
-## 2. WxChat 微信通知代理（nginx 原生版）
-
-官方镜像 `ddsderek/wxchat` 的本质就是 nginx 反代企业微信 API，本脚本直接以 **nginx 原生方式**实现同等功能——**无需 Docker**，纯 nginx 进程内存占用仅几 MB，兼容无法跑 Docker 的低配 NAT 机。
-
-**子菜单**：安装 / 更换端口 / 重启 / 停止 / 卸载 / 状态+公网IP / 实时日志 / 卸载 nginx 本体
-
-**兼容性**：
-
-| 项 | 支持范围 |
-|----|----------|
-| 系统 | Debian / Ubuntu / CentOS / Alpine（自动识别包管理器） |
-| 服务管理 | systemd 优先，无 systemd 自动用 service / 裸进程兜底 |
-| nginx 配置目录 | 自动适配 `/etc/nginx/conf.d`（Debian/CentOS）和 `/etc/nginx/http.d`（Alpine） |
-| IPv6 | 自动检测，NAT 老内核无 IPv6 时只监听 IPv4 |
-| 旧版迁移 | 检测到 Docker 版 wxchat 容器时提示一键迁移 |
-
-生成的配置与官方镜像完全一致（5 条 API 反代 + `client_max_body_size 20m` + 欢迎页）。
-
-**安装完成后必做**：企业微信后台 → 应用 → **可信 IP**，填入 VPS 公网 IP（安装完成时和菜单"查看状态"都会打印）。
-
-访问 `http://VPS公网IP:端口` 出现"微信通知转发代理搭建成功"页即为正常，同时它也是微信通知代理地址。
-
----
-
-## 3. frps 服务端（frp 内网穿透）
-
-从 GitHub 下载 [fatedier/frp](https://github.com/fatedier/frp) 官方二进制安装。下载失败自动走 ghproxy.net / gh-proxy.com 加速回退。**兼容无 systemd 的 NAT 机**：有 systemd 走 service 托管（开机自启、异常 5 秒自动拉起）；无 systemd 自动切 nohup + pidfile 后台模式，并尽力用 crontab @reboot 设置开机自启。运行状态以 bindPort 真实可连接为准（纯 bash 探测，不依赖 pgrep/ss/curl）。
-
-**子菜单**：安装 / 更新 / 重启 / 启动 / 停止 / 卸载 / 状态+配置+公网IP / 日志 / 查看 token / 编辑配置
-
-**安装时交互项**：
-
-| 项 | 默认值 | 说明 |
-|----|--------|------|
-| frp 通信端口 | `7000` | frpc 的 `serverPort` |
-| 面板端口 | `7500`（0 = 不开） | 账号 admin，密码随机生成 |
-| http 穿透端口 | `8080`（0 = 不启用） | `vhostHTTPPort` |
-| https 穿透端口 | `8443`（0 = 不启用） | `vhostHTTPSPort` |
-
-token 随机生成（hex 32位），安装完成时打印，菜单"查看 token"随时可看。
-
-**frpc 客户端配置要点**：`serverAddr = VPS公网IP`、`serverPort = 7000`、`auth.token = 安装时打印的 token`。防火墙和安全组记得放行端口（TCP）。
-
-部署位置：二进制 `/usr/local/frp/frps`、配置 `/etc/frp/frps.toml`、服务 `frps.service`。
-
----
-
-## 4. sing-box 节点管理（调度入口）
-
-主菜单选 4 进入 sing-box 节点管理。采用**调度模式**：管理本体在 [qingshous/sing-box-sh](https://github.com/qingshous/sing-box-sh) 仓库独立维护，本脚本只做入口转发，两边更新互不影响。
-
-- **本机已装过**：直接调用本机的 `sb` 面板（平时也可以不经过本脚本，直接输 `sb` 进入）
-- **本机未装**：自动从 sing-box-sh 仓库拉取 `install.sh`（直连失败走 ghproxy.net / gh-proxy.com 回退），下载后先 `bash -n` 语法校验再执行；首次运行会自动安装 `sb` 快捷命令并进入面板
-- 退出 sing-box 面板后自动返回本脚本主菜单
-
-支持协议：VLESS-REALITY / Hysteria2 / TUIC / AnyTLS / VLESS-Argo / Shadowsocks，含证书管理、Argo 隧道、节点增删改查等完整功能（详见 sing-box-sh 仓库）。
-
-> 注意：sing-box-sh 的 `install.sh` 内部自更新地址指向上游源仓库（edxgj/sing-box-sh），如需改为你自己的仓库，请在你的仓库里修改 `fetch_script()` 中的 URL。
-
----
-
-## 5. realm 端口转发管理（调度入口）
-
-主菜单选 5 进入 realm 端口转发管理。同样采用**调度模式**：管理本体在 [qingshous/realm-xwPF](https://github.com/qingshous/realm-xwPF) 仓库独立维护，本脚本只做入口转发。
-
-- **本机已装过**：直接调用本机入口（平时也可以不经过本脚本，直接输 `pf` 进入）
-- **本机未装**：自动从 realm-xwPF 仓库拉取引导脚本 `xwPF.sh`（直连失败走 ghproxy.net / gh-proxy.com 回退），`bash -n` 校验后带 `install` 参数执行——自动下载全部功能模块（转发规则、流量狗、链路测试）并创建 `pf` 快捷命令
-- 退出面板后自动返回本脚本主菜单
-
-功能：realm 中转规则可视化增删改、端口流量统计（流量狗）、中转链路网络测试（nexttrace/iperf3/hping3）、故障转移等（详见 realm-xwPF 仓库）。
-
-> 注意：realm-xwPF 的 `xwPF.sh` 内部模块下载地址指向上游源仓库（zywe03/realm-xwPF），上游更新会自动跟上；如需改为你自己的仓库，请在你的仓库里修改 `REPO_RAW_URL`。
-
----
-
-## 常见问题
-
-- **提示需要 root**：用 `sudo bash ziyong.sh` 运行。
-- **NAT 机没有 Docker**：不影响，WxChat 是 nginx 原生实现，frps 是官方二进制，全程不需要 Docker。
-- **frpc 连不上 frps**：先查安全组/防火墙是否放行 7000 端口，再核对 token 是否一致。
-- **WxChat 通知收不到**：检查企业微信可信 IP 是否填了 VPS 公网 IP；VPS 换 IP 后要同步更新。
-- **改了 frps 配置不生效**：子菜单 10 编辑后按提示重启，或 `systemctl restart frps`。
-
-## 本地运行
+### 一键安装/进入菜单
 
 ```bash
-git clone https://github.com/qingshous/ziyong.git
-cd ziyong
-sudo bash ziyong.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/qingshous/realm-installer/main/install.sh)
 ```
+
+国内 VPS 连不上 GitHub raw 时：
+
+```bash
+bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshous/realm-installer/main/install.sh)
+```
+
+安装后随时输入 `realm` 唤出菜单。
+
+### 菜单
+
+```
+1. 安装 Realm
+2. 添加转发规则
+3. 删除转发规则
+4. 查看规则列表
+5. 查看运行状态 / 配置
+6. 更新 Realm 内核
+7. 更新本脚本
+8. 卸载 Realm
+0. 退出
+```
+
+## 文件位置
+
+| 项 | 路径 |
+|----|------|
+| 内核 | `/usr/local/bin/realm-bin` |
+| 快捷命令 | `/usr/local/bin/realm` |
+| 配置 | `/etc/realm/config.toml`（600） |
+| 服务 | systemd `realm.service` / OpenRC `/etc/init.d/realm` / nohup（日志 `/var/log/realm.log`） |
 
 ## 说明
 
-- 脚本仅供自用，环境为常见 Debian / Ubuntu / CentOS x86_64（frps 另支持 arm64/arm）VPS。
-- 脚本会执行安装/删除容器、systemd 服务等操作，请确认在 root 权限下运行。
+- realm 上游（zhboner/realm）已归档停更，「更新内核」实际为重装 latest 版，可用于修复损坏
+- 支持 TCP + UDP 双协议转发
+- **realm 不允许空配置运行**（TOML 必须至少一条 `[[endpoints]]`）：安装后服务暂不启动，添加第一条规则时自动启动并设置自启；删除到最后一条规则时服务自动停止
+- 删除规则不会自动回收防火墙已放行的端口，如有需要请手动关闭
