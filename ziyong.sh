@@ -25,7 +25,7 @@
 
 set -o pipefail
 
-VERSION="1.6.0"
+VERSION="1.7.0"
 
 # ================= 通用基础 =================
 
@@ -1411,6 +1411,61 @@ pf_launch() {
 }
 
 # ============================================================
+#  轻量版 realm (调度模式: 本体在 qingshous/realm-installer 仓库维护)
+# ============================================================
+
+RL_MENU="/usr/local/bin/realm"       # 其自带快捷命令 (菜单)
+RL_BIN="/usr/local/bin/realm-bin"    # 内核
+RL_RAW="https://raw.githubusercontent.com/qingshous/realm-installer/main/install.sh"
+
+rl_installed() { [ -f "$RL_BIN" ] || [ -f "$RL_MENU" ]; }
+
+rl_running() {
+    if has_systemd; then
+        systemctl is-active --quiet realm 2>/dev/null && return 0
+    elif has_openrc; then
+        rc-service realm status >/dev/null 2>&1 && return 0
+    fi
+    # 兜底: 扫 /proc 进程名 (轻量版内核进程名为 realm-bin)
+    local p
+    for p in /proc/[0-9]*/comm; do
+        [ "$(cat "$p" 2>/dev/null)" = "realm-bin" ] && return 0
+    done
+    return 1
+}
+
+# 已装 -> 直接调本机 realm 菜单; 未装 -> 拉 install.sh 执行 (进其菜单选 1 安装)
+rl_launch() {
+    # 与 realm-xwPF (菜单5) 都用 realm.service 服务名, 共存会互相接管, 提前提醒
+    if [ -f "/usr/local/bin/xwPF.sh" ]; then
+        warn "检测到已安装 realm-xwPF (菜单 5), 两者服务名相同, 请勿同时运行两套转发!"
+    fi
+    if [ -f "$RL_MENU" ]; then
+        info "检测到本机已安装轻量版 realm, 正在进入..."
+        sleep 1
+        bash "$RL_MENU"
+        return
+    fi
+    local tmp="/tmp/rl_install.$$.sh"
+    info "本机未安装轻量版 realm, 正在从 qingshous/realm-installer 拉取安装脚本..."
+    if curl -fsSL --max-time 30 "$RL_RAW" -o "$tmp" 2>/dev/null \
+       || curl -fsSL --max-time 30 "https://ghproxy.net/$RL_RAW" -o "$tmp" 2>/dev/null \
+       || curl -fsSL --max-time 30 "https://gh-proxy.com/$RL_RAW" -o "$tmp" 2>/dev/null; then
+        if ! head -n 1 "$tmp" | grep -q '^#!/bin/bash' || ! bash -n "$tmp" 2>/dev/null; then
+            err "下载内容校验失败, 已取消"; rm -f "$tmp"; return 1
+        fi
+        info "校验通过, 启动轻量版 realm 管理菜单 (选 1 安装, 退出后返回本菜单)"
+        sleep 1
+        bash "$tmp"
+        rm -f "$tmp"
+        [ -f "$RL_MENU" ] && info "轻量版 realm 以后也可直接输入 realm 进入"
+    else
+        err "下载失败 (已尝试直连/ghproxy/gh-proxy), 请检查网络后重试"
+        return 1
+    fi
+}
+
+# ============================================================
 #  主菜单
 # ============================================================
 
@@ -1464,6 +1519,7 @@ show_main_menu() {
     local frps_tag="  ${RED}[未安装]${PLAIN}"
     local sb_tag="  ${RED}[未安装]${PLAIN}"
     local pf_tag="  ${RED}[未安装]${PLAIN}"
+    local rl_tag="  ${RED}[未安装]${PLAIN}"
     if wxd_running; then
         wxd_tag="  ${GREEN}[运行中]${PLAIN}"
     elif wxd_installed; then
@@ -1489,6 +1545,11 @@ show_main_menu() {
     elif pf_installed; then
         pf_tag="  ${YELLOW}[已停止]${PLAIN}"
     fi
+    if rl_running; then
+        rl_tag="  ${GREEN}[运行中]${PLAIN}"
+    elif rl_installed; then
+        rl_tag="  ${YELLOW}[已停止]${PLAIN}"
+    fi
     clear
     echo -e "${CYAN}╔════════════════════════════════════════════╗"
     echo -e "║         ${BOLD}Slib 自用 VPS 服务管理脚本${PLAIN}${CYAN}         ║"
@@ -1500,12 +1561,13 @@ show_main_menu() {
     echo -e "  ${GREEN}${BOLD}3${PLAIN}. frps 服务端 (frp 内网穿透)${frps_tag}"
     echo -e "  ${GREEN}${BOLD}4${PLAIN}. sing-box 节点管理 (VLESS-REALITY/Hy2/TUIC等)${sb_tag}"
     echo -e "  ${GREEN}${BOLD}5${PLAIN}. realm 端口转发管理 (中转/流量狗)${pf_tag}"
-    echo -e "  ${GREEN}${BOLD}6${PLAIN}. 更新脚本自身 (当前 v${VERSION})"
-    echo -e "  ${GREEN}${BOLD}7${PLAIN}. 卸载脚本自身 (slib/缓存)"
+    echo -e "  ${GREEN}${BOLD}6${PLAIN}. 轻量版 realm (精简转发管理)${rl_tag}"
+    echo -e "  ${GREEN}${BOLD}7${PLAIN}. 更新脚本自身 (当前 v${VERSION})"
+    echo -e "  ${GREEN}${BOLD}8${PLAIN}. 卸载脚本自身 (slib/缓存)"
     echo -e "  ${RED}${BOLD}0${PLAIN}. 退出"
     echo ""
     line
-    read -rp "请选择要管理的服务 [0-7]: " main_choice
+    read -rp "请选择要管理的服务 [0-8]: " main_choice
 }
 
 main() {
@@ -1519,8 +1581,9 @@ main() {
             3) frps_menu ;;
             4) sb_launch;      pause_back ;;
             5) pf_launch;      pause_back ;;
-            6) self_update;    pause_back ;;
-            7) self_uninstall; pause_back ;;
+            6) rl_launch;      pause_back ;;
+            7) self_update;    pause_back ;;
+            8) self_uninstall; pause_back ;;
             0) info "再见!"; exit 0 ;;
             *) warn "无效选项, 请重新输入"; sleep 1 ;;
         esac
