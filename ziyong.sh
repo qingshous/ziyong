@@ -25,7 +25,7 @@
 
 set -o pipefail
 
-VERSION="1.4.0"
+VERSION="1.5.0"
 
 # ================= 通用基础 =================
 
@@ -1308,6 +1308,58 @@ frps_menu() {
 }
 
 # ============================================================
+#  sing-box 节点管理 (调度模式: 本体在 qingshous/sing-box-sh 仓库维护)
+# ============================================================
+
+SB_CMD="/usr/local/bin/sb"          # sing-box 脚本自己的快捷命令
+SB_BIN_FILE="/usr/local/bin/sing-box"
+SB_RAW="https://raw.githubusercontent.com/qingshous/sing-box-sh/main/install.sh"
+
+sb_installed() { [ -f "$SB_CMD" ] || [ -x "$SB_BIN_FILE" ]; }
+
+sb_running() {
+    if has_systemd; then
+        systemctl is-active --quiet sing-box 2>/dev/null && return 0
+    elif has_openrc; then
+        rc-service sing-box status >/dev/null 2>&1 && return 0
+    fi
+    # 兜底: 扫 /proc 进程名
+    local p
+    for p in /proc/[0-9]*/comm; do
+        [ "$(cat "$p" 2>/dev/null)" = "sing-box" ] && return 0
+    done
+    return 1
+}
+
+# 已装 -> 直接调本机 sb 面板; 未装 -> 在线拉取 install.sh 执行 (自动装 sb)
+sb_launch() {
+    if [ -f "$SB_CMD" ]; then
+        info "检测到本机已安装 sing-box 管理面板, 正在进入..."
+        sleep 1
+        bash "$SB_CMD"
+        return
+    fi
+    local tmp="/tmp/sb_install.$$.sh"
+    info "本机未安装 sing-box, 正在从 qingshous/sing-box-sh 拉取安装脚本..."
+    if curl -fsSL --max-time 30 "$SB_RAW" -o "$tmp" 2>/dev/null \
+       || curl -fsSL --max-time 30 "https://ghproxy.net/$SB_RAW" -o "$tmp" 2>/dev/null \
+       || curl -fsSL --max-time 30 "https://gh-proxy.com/$SB_RAW" -o "$tmp" 2>/dev/null; then
+        if ! head -n 1 "$tmp" | grep -q '^#!/bin/bash' || ! bash -n "$tmp" 2>/dev/null; then
+            err "下载内容校验失败, 已取消"; rm -f "$tmp"; return 1
+        fi
+        info "校验通过, 启动 sing-box 安装/管理面板 (退出面板后返回本菜单)"
+        sleep 1
+        bash "$tmp"
+        rm -f "$tmp"
+        # 首次安装后 sb 快捷命令已生成, 提示用户
+        [ -f "$SB_CMD" ] && info "sing-box 面板以后也可直接输入 sb 进入"
+    else
+        err "下载失败 (已尝试直连/ghproxy/gh-proxy), 请检查网络后重试"
+        return 1
+    fi
+}
+
+# ============================================================
 #  主菜单
 # ============================================================
 
@@ -1345,7 +1397,7 @@ self_update() {
 # 卸载脚本自身 (slib 快捷命令 + /etc/ziyong 缓存), 不动已安装的服务
 self_uninstall() {
     warn "将删除: slib 快捷命令, ${ZIYONG_DIR} 目录 (含端口持久化记录)"
-    warn "已安装的服务 (WxChat/frps) 不受影响, 但重跑脚本后端口需重新指定"
+    warn "已安装的服务 (WxChat/frps/sing-box) 均不受影响, 但重跑脚本后端口需重新指定"
     if ask_yn "确认卸载脚本自身?" "Y"; then
         rm -f "$SHORTCUT"
         rm -rf "$ZIYONG_DIR"
@@ -1359,6 +1411,7 @@ show_main_menu() {
     local wxd_tag="  ${RED}[未安装]${PLAIN}"
     local wx_tag="  ${RED}[未安装]${PLAIN}"
     local frps_tag="  ${RED}[未安装]${PLAIN}"
+    local sb_tag="  ${RED}[未安装]${PLAIN}"
     if wxd_running; then
         wxd_tag="  ${GREEN}[运行中]${PLAIN}"
     elif wxd_installed; then
@@ -1374,6 +1427,11 @@ show_main_menu() {
     elif frps_installed; then
         frps_tag="  ${YELLOW}[已停止]${PLAIN}"
     fi
+    if sb_running; then
+        sb_tag="  ${GREEN}[运行中]${PLAIN}"
+    elif sb_installed; then
+        sb_tag="  ${YELLOW}[已停止]${PLAIN}"
+    fi
     clear
     echo -e "${CYAN}╔════════════════════════════════════════════╗"
     echo -e "║         ${BOLD}Slib 自用 VPS 服务管理脚本${PLAIN}${CYAN}         ║"
@@ -1383,12 +1441,13 @@ show_main_menu() {
     echo -e "  ${GREEN}${BOLD}1${PLAIN}. WxChat 微信通知转发代理 (Docker 版)${wxd_tag}"
     echo -e "  ${GREEN}${BOLD}2${PLAIN}. WxChat 微信通知转发代理 (nginx 版)${wx_tag}"
     echo -e "  ${GREEN}${BOLD}3${PLAIN}. frps 服务端 (frp 内网穿透)${frps_tag}"
-    echo -e "  ${GREEN}${BOLD}4${PLAIN}. 更新脚本自身 (当前 v${VERSION})"
-    echo -e "  ${GREEN}${BOLD}5${PLAIN}. 卸载脚本自身 (slib/缓存)"
+    echo -e "  ${GREEN}${BOLD}4${PLAIN}. sing-box 节点管理 (VLESS-REALITY/Hy2/TUIC等)${sb_tag}"
+    echo -e "  ${GREEN}${BOLD}5${PLAIN}. 更新脚本自身 (当前 v${VERSION})"
+    echo -e "  ${GREEN}${BOLD}6${PLAIN}. 卸载脚本自身 (slib/缓存)"
     echo -e "  ${RED}${BOLD}0${PLAIN}. 退出"
     echo ""
     line
-    read -rp "请选择要管理的服务 [0-5]: " main_choice
+    read -rp "请选择要管理的服务 [0-6]: " main_choice
 }
 
 main() {
@@ -1400,8 +1459,9 @@ main() {
             1) wxd_menu ;;
             2) wx_menu ;;
             3) frps_menu ;;
-            4) self_update;    pause_back ;;
-            5) self_uninstall; pause_back ;;
+            4) sb_launch;      pause_back ;;
+            5) self_update;    pause_back ;;
+            6) self_uninstall; pause_back ;;
             0) info "再见!"; exit 0 ;;
             *) warn "无效选项, 请重新输入"; sleep 1 ;;
         esac

@@ -34,6 +34,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 | **1. WxChat（Docker 版）** | 微信通知转发代理，官方镜像 `ddsderek/wxchat` 一键部署 |
 | **2. WxChat（nginx 版）** | 同等功能的 nginx 原生实现，**无需 Docker**，低配 NAT 机也能跑 |
 | **3. frps** | frp 服务端（fatedier/frp 官方二进制），内网穿透，装完直接打印 frpc 客户端配置示例 |
+| **4. sing-box 节点管理** | 调度入口，本体在 [qingshous/sing-box-sh](https://github.com/qingshous/sing-box-sh) 仓库独立维护（VLESS-REALITY / Hysteria2 / TUIC / AnyTLS / VLESS-Argo / Shadowsocks） |
 
 两个版本的 WxChat 功能完全等价（都是反代企业微信 API），可任选其一安装，也可共存（不同端口）。
 
@@ -41,13 +42,14 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 ╔════════════════════════════════════════════╗
 ║         Slib 自用 VPS 服务管理脚本         ║
 ╚════════════════════════════════════════════╝
-  快捷命令: slib    版本: v1.3.2
+  快捷命令: slib    版本: v1.5.0
 
   1. WxChat 微信通知转发代理 (Docker 版)
   2. WxChat 微信通知转发代理 (nginx 版)
   3. frps 服务端 (frp 内网穿透)
-  4. 更新脚本自身
-  5. 卸载脚本自身 (slib/缓存)
+  4. sing-box 节点管理 (VLESS-REALITY/Hy2/TUIC等)
+  5. 更新脚本自身
+  6. 卸载脚本自身 (slib/缓存)
   0. 退出
 ```
 
@@ -111,6 +113,20 @@ token 随机生成（hex 32位），安装完成时打印，菜单"查看 token"
 **frpc 客户端配置要点**：`serverAddr = VPS公网IP`、`serverPort = 7000`、`auth.token = 安装时打印的 token`。防火墙和安全组记得放行端口（TCP）。
 
 部署位置：二进制 `/usr/local/frp/frps`、配置 `/etc/frp/frps.toml`、服务 `frps.service`。
+
+---
+
+## 4. sing-box 节点管理（调度入口）
+
+主菜单选 4 进入 sing-box 节点管理。采用**调度模式**：管理本体在 [qingshous/sing-box-sh](https://github.com/qingshous/sing-box-sh) 仓库独立维护，本脚本只做入口转发，两边更新互不影响。
+
+- **本机已装过**：直接调用本机的 `sb` 面板（平时也可以不经过本脚本，直接输 `sb` 进入）
+- **本机未装**：自动从 sing-box-sh 仓库拉取 `install.sh`（直连失败走 ghproxy.net / gh-proxy.com 回退），下载后先 `bash -n` 语法校验再执行；首次运行会自动安装 `sb` 快捷命令并进入面板
+- 退出 sing-box 面板后自动返回本脚本主菜单
+
+支持协议：VLESS-REALITY / Hysteria2 / TUIC / AnyTLS / VLESS-Argo / Shadowsocks，含证书管理、Argo 隧道、节点增删改查等完整功能（详见 sing-box-sh 仓库）。
+
+> 注意：sing-box-sh 的 `install.sh` 内部自更新地址指向上游源仓库（edxgj/sing-box-sh），如需改为你自己的仓库，请在你的仓库里修改 `fetch_script()` 中的 URL。
 
 ---
 
