@@ -35,6 +35,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 | **2. WxChat（nginx 版）** | 同等功能的 nginx 原生实现，**无需 Docker**，低配 NAT 机也能跑 |
 | **3. frps** | frp 服务端（fatedier/frp 官方二进制），内网穿透，装完直接打印 frpc 客户端配置示例 |
 | **4. sing-box 节点管理** | 调度入口，本体在 [qingshous/sing-box-sh](https://github.com/qingshous/sing-box-sh) 仓库独立维护（VLESS-REALITY / Hysteria2 / TUIC / AnyTLS / VLESS-Argo / Shadowsocks） |
+| **5. realm 端口转发管理** | 调度入口，本体在 [qingshous/realm-xwPF](https://github.com/qingshous/realm-xwPF) 仓库独立维护（realm 中转规则可视化管理、端口流量狗、链路测试） |
 
 两个版本的 WxChat 功能完全等价（都是反代企业微信 API），可任选其一安装，也可共存（不同端口）。
 
@@ -42,14 +43,15 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 ╔════════════════════════════════════════════╗
 ║         Slib 自用 VPS 服务管理脚本         ║
 ╚════════════════════════════════════════════╝
-  快捷命令: slib    版本: v1.5.0
+  快捷命令: slib    版本: v1.6.0
 
   1. WxChat 微信通知转发代理 (Docker 版)
   2. WxChat 微信通知转发代理 (nginx 版)
   3. frps 服务端 (frp 内网穿透)
   4. sing-box 节点管理 (VLESS-REALITY/Hy2/TUIC等)
-  5. 更新脚本自身
-  6. 卸载脚本自身 (slib/缓存)
+  5. realm 端口转发管理 (中转/流量狗)
+  6. 更新脚本自身
+  7. 卸载脚本自身 (slib/缓存)
   0. 退出
 ```
 
@@ -127,6 +129,20 @@ token 随机生成（hex 32位），安装完成时打印，菜单"查看 token"
 支持协议：VLESS-REALITY / Hysteria2 / TUIC / AnyTLS / VLESS-Argo / Shadowsocks，含证书管理、Argo 隧道、节点增删改查等完整功能（详见 sing-box-sh 仓库）。
 
 > 注意：sing-box-sh 的 `install.sh` 内部自更新地址指向上游源仓库（edxgj/sing-box-sh），如需改为你自己的仓库，请在你的仓库里修改 `fetch_script()` 中的 URL。
+
+---
+
+## 5. realm 端口转发管理（调度入口）
+
+主菜单选 5 进入 realm 端口转发管理。同样采用**调度模式**：管理本体在 [qingshous/realm-xwPF](https://github.com/qingshous/realm-xwPF) 仓库独立维护，本脚本只做入口转发。
+
+- **本机已装过**：直接调用本机入口（平时也可以不经过本脚本，直接输 `pf` 进入）
+- **本机未装**：自动从 realm-xwPF 仓库拉取引导脚本 `xwPF.sh`（直连失败走 ghproxy.net / gh-proxy.com 回退），`bash -n` 校验后带 `install` 参数执行——自动下载全部功能模块（转发规则、流量狗、链路测试）并创建 `pf` 快捷命令
+- 退出面板后自动返回本脚本主菜单
+
+功能：realm 中转规则可视化增删改、端口流量统计（流量狗）、中转链路网络测试（nexttrace/iperf3/hping3）、故障转移等（详见 realm-xwPF 仓库）。
+
+> 注意：realm-xwPF 的 `xwPF.sh` 内部模块下载地址指向上游源仓库（zywe03/realm-xwPF），上游更新会自动跟上；如需改为你自己的仓库，请在你的仓库里修改 `REPO_RAW_URL`。
 
 ---
 
