@@ -14,7 +14,9 @@
 #    - NAT 网络自动检测, 提醒使用服务商映射端口
 #    - y/n 交互默认 Y, 回车=默认, 误触空格等无效输入会重新询问
 #    - 安装信息持久化 (/etc/ziyong/), 重跑脚本不丢配置
-#    - 兼容无 systemd 的 NAT 机 (nginx/frps 自动切 nohup 模式)
+#    - 兼容无 systemd 的 NAT 机 (nginx/frps 自动切 OpenRC 或 nohup 模式)
+#    - 端口输入有合法性+占用双重校验
+#    - token 相关文件权限收紧 600
 #    - 运行状态以端口真实响应为准, 不依赖 pgrep/ss/curl
 #    - 自动检测 ufw/firewalld 并放行端口
 #    - 快捷命令: 首次运行后任意位置输入 slib 打开本脚本
@@ -23,7 +25,7 @@
 
 set -o pipefail
 
-VERSION="1.3.4"
+VERSION="1.4.0"
 
 # ================= 通用基础 =================
 
@@ -91,6 +93,9 @@ gen_token() {
 # 是否有可用 systemd (NAT 机/容器常没有)
 has_systemd() { command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; }
 
+# 是否有运行中的 OpenRC (Alpine 等, rc-service 可用)
+has_openrc() { command -v rc-service >/dev/null 2>&1 && [ -d /run/openrc ]; }
+
 # 通用 TCP 端口探测 (纯 bash /dev/tcp, 不依赖 ss/netstat/curl —— 低配机这些可能全缺)
 tcp_port_alive() {
     (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; }
@@ -114,17 +119,23 @@ is_valid_port() {
     [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
-# ask_port "提示" 默认值 [allow_zero] -> 输出合法端口 (空输入=默认值, 非法重输)
+# ask_port "提示" 默认值 [allow_zero] [放行端口] -> 输出合法端口
+# 空输入=默认值, 非法/被占用重输; 放行端口用于重装场景容忍服务自己正在用的端口
 # 注意: 函数内所有提示必须走 >&2, 否则会被 $( ) 捕获
 ask_port() {
-    local prompt="$1" def="$2" allow_zero="${3:-no}" p
+    local prompt="$1" def="$2" allow_zero="${3:-no}" allow_in_use="${4:-}" p
     while :; do
         read -rp "${prompt} [直接回车=${def}]: " p
         p="${p:-$def}"
-        if is_valid_port "$p" || { [ "$allow_zero" = "yes" ] && [ "$p" = "0" ]; }; then
-            echo "$p"; return
+        if ! is_valid_port "$p" && ! { [ "$allow_zero" = "yes" ] && [ "$p" = "0" ]; }; then
+            echo -e "${YELLOW}[注意]${PLAIN} 端口无效: ${p} (应为 1-65535 的数字)" >&2
+            continue
         fi
-        echo -e "${YELLOW}[注意]${PLAIN} 端口无效: ${p} (应为 1-65535 的数字)" >&2
+        if [ "$p" != "0" ] && [ "$p" != "$allow_in_use" ] && tcp_port_alive "$p"; then
+            echo -e "${YELLOW}[注意]${PLAIN} 端口 ${p} 已被其他服务占用, 请换一个" >&2
+            continue
+        fi
+        echo "$p"; return
     done
 }
 
@@ -220,10 +231,10 @@ install_docker() {
     info "Docker 安装完成: $(docker -v)"
 }
 
-# 安装信息持久化 (WxChat 两个版本各自独立)
-save_wx_conf()  { mkdir -p "$ZIYONG_DIR"; echo "WX_PORT=${WX_PORT}" > "$WX_NGINX_CONF_PERSIST"; }
+# 安装信息持久化 (WxChat 两个版本各自独立, 权限 600 防普通用户读取)
+save_wx_conf()  { mkdir -p "$ZIYONG_DIR"; chmod 700 "$ZIYONG_DIR"; echo "WX_PORT=${WX_PORT}" > "$WX_NGINX_CONF_PERSIST"; chmod 600 "$WX_NGINX_CONF_PERSIST"; }
 load_wx_conf()  { WX_PORT="15680"; [ -f "$WX_NGINX_CONF_PERSIST" ] && . "$WX_NGINX_CONF_PERSIST"; }
-save_wxd_conf() { mkdir -p "$ZIYONG_DIR"; echo "WXD_PORT=${WXD_PORT}" > "$WX_DOCKER_CONF_PERSIST"; }
+save_wxd_conf() { mkdir -p "$ZIYONG_DIR"; chmod 700 "$ZIYONG_DIR"; echo "WXD_PORT=${WXD_PORT}" > "$WX_DOCKER_CONF_PERSIST"; chmod 600 "$WX_DOCKER_CONF_PERSIST"; }
 load_wxd_conf() { WXD_PORT="15680"; [ -f "$WX_DOCKER_CONF_PERSIST" ] && . "$WX_DOCKER_CONF_PERSIST"; }
 
 # slib 快捷命令: 任意位置输入 slib 打开本脚本
@@ -279,7 +290,9 @@ wxd_install() {
     fi
     echo ""
     nat_port_hint
-    WXD_PORT=$(ask_port "请输入宿主机端口" "$(random_free_port)")
+    local allow=""
+    wxd_installed && { load_wxd_conf; allow="$WXD_PORT"; }
+    WXD_PORT=$(ask_port "请输入宿主机端口" "$(random_free_port)" no "$allow")
 
     if wxd_installed; then
         warn "检测到已存在的 ${WXD_NAME} 容器, 先删除旧容器..."
@@ -467,10 +480,10 @@ wx_running() {
     [ -f "$(wx_conf_path)" ] && wx_port_alive
 }
 
-# nginx 服务控制, 兼容 systemd / service / 裸进程
+# nginx 服务控制, 三通道: systemd / OpenRC / 裸进程
 nginx_ctl() {
     local action="$1"
-    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    if has_systemd; then
         case "$action" in
             enable)
                 # 注意: apt 装完 nginx 会自动启动, enable --now 不会 reload 新配置
@@ -484,6 +497,19 @@ nginx_ctl() {
                 ;;
             reload) systemctl reload nginx 2>/dev/null || systemctl restart nginx ;;
             *)      systemctl "$action" nginx ;;
+        esac
+    elif has_openrc; then
+        case "$action" in
+            enable)
+                rc-update add nginx default >/dev/null 2>&1
+                if rc-service nginx status >/dev/null 2>&1; then
+                    rc-service nginx reload 2>/dev/null || rc-service nginx restart
+                else
+                    rc-service nginx start
+                fi
+                ;;
+            reload) rc-service nginx reload 2>/dev/null || rc-service nginx restart ;;
+            *)      rc-service nginx "$action" ;;
         esac
     else
         case "$action" in
@@ -586,7 +612,9 @@ wx_install() {
     wx_install_nginx || return 1
     echo ""
     nat_port_hint
-    WX_PORT=$(ask_port "请输入监听端口" "$(random_free_port)")
+    local allow=""
+    wx_installed && allow="$WX_PORT"
+    WX_PORT=$(ask_port "请输入监听端口" "$(random_free_port)" no "$allow")
 
     wx_write_webpage
     wx_write_config
@@ -624,7 +652,7 @@ wx_change_port() {
     fi
     load_wx_conf
     nat_port_hint
-    WX_PORT=$(ask_port "新端口 (当前 ${WX_PORT})" "$(random_free_port)")
+    WX_PORT=$(ask_port "新端口 (当前 ${WX_PORT})" "$(random_free_port)" no "$WX_PORT")
     wx_write_config
     nginx -t 2>/dev/null || { err "nginx 配置测试失败"; return 1; }
     nginx_ctl reload || { err "nginx 重载失败"; return 1; }
@@ -829,6 +857,23 @@ FRPS_CONF_BAK="${ZIYONG_DIR}/frps.toml.bak"
 
 FRPS_PID_FILE="/run/frps.pid"
 FRPS_LOG_FILE="/var/log/frps.log"
+FRPS_OPENRC="/etc/init.d/frps"
+
+# 生成 OpenRC init 脚本 (Alpine 等无 systemd 但有 OpenRC 的环境)
+frps_write_openrc() {
+    cat > "$FRPS_OPENRC" <<EOF
+#!/sbin/openrc-run
+name="frps"
+description="frp server (ziyong)"
+command="${FRPS_BIN}"
+command_args="-c ${FRPS_CONF_FILE}"
+command_background="yes"
+pidfile="${FRPS_PID_FILE}"
+output_log="${FRPS_LOG_FILE}"
+error_log="${FRPS_LOG_FILE}"
+EOF
+    chmod +x "$FRPS_OPENRC"
+}
 
 frps_installed() { [ -f "$FRPS_BIN" ]; }
 
@@ -866,7 +911,7 @@ frps_kill_all() {
     done
 }
 
-# frps 服务控制, 双通道: systemd / nohup+pidfile (NAT 机无 systemd)
+# frps 服务控制, 三通道: systemd / OpenRC / nohup+pidfile
 frps_ctl() {
     local action="$1"
     if has_systemd; then
@@ -874,6 +919,14 @@ frps_ctl() {
             enable)  systemctl enable --now frps ;;
             disable) systemctl disable --now frps ;;
             *)       systemctl "$action" frps ;;
+        esac
+        return
+    fi
+    if has_openrc && [ -f "$FRPS_OPENRC" ]; then
+        case "$action" in
+            enable)  rc-update add frps default >/dev/null 2>&1; rc-service frps start ;;
+            disable) rc-service frps stop >/dev/null 2>&1; rc-update del frps default >/dev/null 2>&1 ;;
+            *)       rc-service frps "$action" ;;
         esac
         return
     fi
@@ -904,20 +957,28 @@ frps_ctl() {
     esac
 }
 
-# 无 systemd 时尽力设置开机自启 (crontab @reboot)
+# 无 systemd 时设置开机自启 (OpenRC 原生 / crontab @reboot 兜底)
 frps_setup_autostart() {
     has_systemd && return 0
+    if has_openrc; then
+        info "已通过 OpenRC 设置开机自启 (rc-update add frps default)"
+        return 0
+    fi
     if command -v crontab >/dev/null 2>&1; then
         ( crontab -l 2>/dev/null | grep -v 'ziyong-frps'; echo "@reboot ${FRPS_BIN} -c ${FRPS_CONF_FILE} >>${FRPS_LOG_FILE} 2>&1 &  # ziyong-frps" ) | crontab - \
             && { info "已通过 crontab @reboot 设置开机自启"; return 0; }
     fi
-    warn "无 systemd 且未找到 crontab, 无法设置开机自启; 机器重启后需手动执行:"
+    warn "无 systemd/OpenRC 且未找到 crontab, 无法设置开机自启; 机器重启后需手动执行:"
     echo "    nohup ${FRPS_BIN} -c ${FRPS_CONF_FILE} >>${FRPS_LOG_FILE} 2>&1 &"
 }
 
 # 清理开机自启 (卸载时)
 frps_remove_autostart() {
     has_systemd && return 0
+    if has_openrc; then
+        rc-update del frps default >/dev/null 2>&1
+        return 0
+    fi
     command -v crontab >/dev/null 2>&1 && ( crontab -l 2>/dev/null | grep -v 'ziyong-frps' ) | crontab - 2>/dev/null
     return 0
 }
@@ -943,10 +1004,18 @@ frps_install() {
     fi
     echo ""
     nat_port_hint
-    BIND_PORT=$(ask_port "frp 通信端口" "$r1")
-    DASHBOARD_PORT=$(ask_port "面板端口, 0不开" "$r2" yes)
-    VHOST_HTTP_PORT=$(ask_port "http穿透端口, 0不启用" "$r3" yes)
-    VHOST_HTTPS_PORT=$(ask_port "https穿透端口, 0不启用" "$r4" yes)
+    # 重装场景放行本服务正在使用的旧端口
+    local allow_b="" allow_d="" allow_h="" allow_hs=""
+    if frps_installed; then
+        allow_b=$(frps_bind_port)
+        allow_d=$(grep -m1 -oE '^webServer\.port *= *[0-9]+' "$FRPS_CONF_FILE" 2>/dev/null | grep -oE '[0-9]+$')
+        allow_h=$(grep -m1 -oE '^vhostHTTPPort *= *[0-9]+' "$FRPS_CONF_FILE" 2>/dev/null | grep -oE '[0-9]+$')
+        allow_hs=$(grep -m1 -oE '^vhostHTTPSPort *= *[0-9]+' "$FRPS_CONF_FILE" 2>/dev/null | grep -oE '[0-9]+$')
+    fi
+    BIND_PORT=$(ask_port "frp 通信端口" "$r1" no "$allow_b")
+    DASHBOARD_PORT=$(ask_port "面板端口, 0不开" "$r2" yes "$allow_d")
+    VHOST_HTTP_PORT=$(ask_port "http穿透端口, 0不启用" "$r3" yes "$allow_h")
+    VHOST_HTTPS_PORT=$(ask_port "https穿透端口, 0不启用" "$r4" yes "$allow_hs")
 
     local ver arch url tmp
     ver=$(get_latest_version)
@@ -983,6 +1052,8 @@ webServer.password = \"${dashboard_pwd}\""
         [ "$VHOST_HTTPS_PORT" != "0" ] && echo "vhostHTTPSPort = ${VHOST_HTTPS_PORT}"
         [ -n "$dashboard_block" ] && echo "$dashboard_block"
     } > "$FRPS_CONF_FILE"
+    chmod 600 "$FRPS_CONF_FILE"  # 内含 token, 仅 root 可读
+    [ -f "$FRPS_CONF_BAK" ] && chmod 600 "$FRPS_CONF_BAK"
 
     if has_systemd; then
         cat > "$FRPS_SERVICE" <<EOF
@@ -1001,8 +1072,11 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
+    elif has_openrc; then
+        frps_write_openrc
+        info "未检测到 systemd, 使用 OpenRC 托管 (rc-service frps, 日志: ${FRPS_LOG_FILE})"
     else
-        warn "未检测到 systemd, 使用 nohup 后台模式运行 (日志: ${FRPS_LOG_FILE})"
+        warn "未检测到 systemd/OpenRC, 使用 nohup 后台模式运行 (日志: ${FRPS_LOG_FILE})"
     fi
 
     # 重装场景: 先停掉可能还在跑旧配置的进程
@@ -1099,7 +1173,7 @@ frps_uninstall() {
     if ask_yn "确认卸载 frps? 配置和 token 将被删除" "Y"; then
         frps_ctl disable >/dev/null 2>&1
         frps_remove_autostart
-        rm -f "$FRPS_SERVICE" "$FRPS_BIN" "$FRPS_CONF_FILE" "$FRPS_CONF_BAK" "$FRPS_PID_FILE"
+        rm -f "$FRPS_SERVICE" "$FRPS_OPENRC" "$FRPS_BIN" "$FRPS_CONF_FILE" "$FRPS_CONF_BAK" "$FRPS_PID_FILE"
         has_systemd && systemctl daemon-reload
         info "frps 已卸载"
     else
@@ -1268,6 +1342,19 @@ self_update() {
     fi
 }
 
+# 卸载脚本自身 (slib 快捷命令 + /etc/ziyong 缓存), 不动已安装的服务
+self_uninstall() {
+    warn "将删除: slib 快捷命令, ${ZIYONG_DIR} 目录 (含端口持久化记录)"
+    warn "已安装的服务 (WxChat/frps) 不受影响, 但重跑脚本后端口需重新指定"
+    if ask_yn "确认卸载脚本自身?" "Y"; then
+        rm -f "$SHORTCUT"
+        rm -rf "$ZIYONG_DIR"
+        info "脚本自身已卸载, 再见!"
+        exit 0
+    fi
+    info "已取消"
+}
+
 show_main_menu() {
     local wxd_tag="  ${RED}[未安装]${PLAIN}"
     local wx_tag="  ${RED}[未安装]${PLAIN}"
@@ -1297,13 +1384,15 @@ show_main_menu() {
     echo -e "  ${GREEN}${BOLD}2${PLAIN}. WxChat 微信通知转发代理 (nginx 版)${wx_tag}"
     echo -e "  ${GREEN}${BOLD}3${PLAIN}. frps 服务端 (frp 内网穿透)${frps_tag}"
     echo -e "  ${GREEN}${BOLD}4${PLAIN}. 更新脚本自身 (当前 v${VERSION})"
+    echo -e "  ${GREEN}${BOLD}5${PLAIN}. 卸载脚本自身 (slib/缓存)"
     echo -e "  ${RED}${BOLD}0${PLAIN}. 退出"
     echo ""
     line
-    read -rp "请选择要管理的服务 [0-4]: " main_choice
+    read -rp "请选择要管理的服务 [0-5]: " main_choice
 }
 
 main() {
+    check_root
     setup_shortcut
     while true; do
         show_main_menu
@@ -1311,7 +1400,8 @@ main() {
             1) wxd_menu ;;
             2) wx_menu ;;
             3) frps_menu ;;
-            4) self_update; pause_back ;;
+            4) self_update;    pause_back ;;
+            5) self_uninstall; pause_back ;;
             0) info "再见!"; exit 0 ;;
             *) warn "无效选项, 请重新输入"; sleep 1 ;;
         esac
