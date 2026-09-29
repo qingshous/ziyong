@@ -25,7 +25,7 @@
 
 set -o pipefail
 
-VERSION="1.7.0"
+VERSION="1.7.1"
 
 # ================= 通用基础 =================
 
@@ -1369,17 +1369,21 @@ PF_RAW="https://raw.githubusercontent.com/qingshous/realm-xwPF/main/xwPF.sh"
 
 pf_installed() { [ -f "$PF_ENTRY" ]; }
 
+# xwPF 的内核是 /usr/local/bin/realm (进程名 realm)
+# 注意: 轻量版也用 realm.service 服务名, 所以服务状态只在轻量版未装时才作为依据
 pf_running() {
-    if has_systemd; then
-        systemctl is-active --quiet realm 2>/dev/null && return 0
-    elif has_openrc; then
-        rc-service realm status >/dev/null 2>&1 && return 0
-    fi
-    # 兜底: 扫 /proc 进程名
+    pf_installed || return 1
     local p
     for p in /proc/[0-9]*/comm; do
         [ "$(cat "$p" 2>/dev/null)" = "realm" ] && return 0
     done
+    if [ ! -f "$RL_BIN" ] && [ ! -f "$RL_MENU" ] && [ ! -f "$RL_LEGACY" ]; then
+        if has_systemd; then
+            systemctl is-active --quiet realm 2>/dev/null && return 0
+        elif has_openrc; then
+            rc-service realm status >/dev/null 2>&1 && return 0
+        fi
+    fi
     return 1
 }
 
@@ -1414,36 +1418,55 @@ pf_launch() {
 #  轻量版 realm (调度模式: 本体在 qingshous/realm-installer 仓库维护)
 # ============================================================
 
-RL_MENU="/usr/local/bin/realm"       # 其自带快捷命令 (菜单)
+RL_MENU="/usr/local/bin/rl"          # 其自带快捷命令 (改为 rl, 原 realm 与 xwPF 内核抢路径)
+RL_LEGACY="/usr/local/bin/realm"     # 旧版快捷命令路径 (仅在确认是本脚本时使用)
 RL_BIN="/usr/local/bin/realm-bin"    # 内核
 RL_RAW="https://raw.githubusercontent.com/qingshous/realm-installer/main/install.sh"
 
-rl_installed() { [ -f "$RL_BIN" ] || [ -f "$RL_MENU" ]; }
+# 该路径上的文件是否为本脚本 (避免把 xwPF 的内核误判为轻量版菜单)
+rl_is_ours() { [ -f "$1" ] && grep -q 'Realm 一键安装与管理脚本' "$1" 2>/dev/null; }
 
+rl_installed() {
+    [ -f "$RL_BIN" ] && return 0
+    [ -f "$RL_MENU" ] && return 0
+    rl_is_ours "$RL_LEGACY" && return 0
+    return 1
+}
+
+# 轻量版内核进程名为 realm-bin, 与 xwPF 的 realm 天然区分
 rl_running() {
-    if has_systemd; then
-        systemctl is-active --quiet realm 2>/dev/null && return 0
-    elif has_openrc; then
-        rc-service realm status >/dev/null 2>&1 && return 0
-    fi
-    # 兜底: 扫 /proc 进程名 (轻量版内核进程名为 realm-bin)
+    rl_installed || return 1
     local p
     for p in /proc/[0-9]*/comm; do
         [ "$(cat "$p" 2>/dev/null)" = "realm-bin" ] && return 0
     done
+    # 兜底: xwPF 未装时, realm.service 的归属才是轻量版
+    if [ ! -f "$PF_ENTRY" ]; then
+        if has_systemd; then
+            systemctl is-active --quiet realm 2>/dev/null && return 0
+        elif has_openrc; then
+            rc-service realm status >/dev/null 2>&1 && return 0
+        fi
+    fi
     return 1
 }
 
-# 已装 -> 直接调本机 realm 菜单; 未装 -> 拉 install.sh 执行 (进其菜单选 1 安装)
+# 已装 -> 直接调本机 rl 菜单; 未装 -> 拉 install.sh 执行 (进其菜单选 1 安装)
 rl_launch() {
-    # 与 realm-xwPF (菜单5) 都用 realm.service 服务名, 共存会互相接管, 提前提醒
-    if [ -f "/usr/local/bin/xwPF.sh" ]; then
-        warn "检测到已安装 realm-xwPF (菜单 5), 两者服务名相同, 请勿同时运行两套转发!"
+    # 与 realm-xwPF 都用 realm.service + /etc/realm/config.toml, 共存会互相接管
+    if [ -f "$PF_ENTRY" ]; then
+        warn "检测到已安装 realm-xwPF (菜单 5), 两者服务名/配置路径相同, 请勿同时运行两套转发!"
     fi
+    local rl_cmd=""
     if [ -f "$RL_MENU" ]; then
+        rl_cmd="$RL_MENU"
+    elif rl_is_ours "$RL_LEGACY"; then
+        rl_cmd="$RL_LEGACY"   # 旧版快捷命令 (升级后会变成 rl)
+    fi
+    if [ -n "$rl_cmd" ]; then
         info "检测到本机已安装轻量版 realm, 正在进入..."
         sleep 1
-        bash "$RL_MENU"
+        bash "$rl_cmd"
         return
     fi
     local tmp="/tmp/rl_install.$$.sh"
@@ -1458,7 +1481,7 @@ rl_launch() {
         sleep 1
         bash "$tmp"
         rm -f "$tmp"
-        [ -f "$RL_MENU" ] && info "轻量版 realm 以后也可直接输入 realm 进入"
+        [ -f "$RL_MENU" ] && info "轻量版 realm 以后也可直接输入 rl 进入"
     else
         err "下载失败 (已尝试直连/ghproxy/gh-proxy), 请检查网络后重试"
         return 1
@@ -1560,8 +1583,8 @@ show_main_menu() {
     echo -e "  ${GREEN}${BOLD}2${PLAIN}. WxChat 微信通知转发代理 (nginx 版)${wx_tag}"
     echo -e "  ${GREEN}${BOLD}3${PLAIN}. frps 服务端 (frp 内网穿透)${frps_tag}"
     echo -e "  ${GREEN}${BOLD}4${PLAIN}. sing-box 节点管理 (VLESS-REALITY/Hy2/TUIC等)${sb_tag}"
-    echo -e "  ${GREEN}${BOLD}5${PLAIN}. realm 端口转发管理 (中转/流量狗)${pf_tag}"
-    echo -e "  ${GREEN}${BOLD}6${PLAIN}. 轻量版 realm (精简转发管理)${rl_tag}"
+    echo -e "  ${GREEN}${BOLD}5${PLAIN}. realm 转发管理 xwPF版 (流量狗/链路测试)${pf_tag}"
+    echo -e "  ${GREEN}${BOLD}6${PLAIN}. 轻量版 realm (realm-installer: 精简)${rl_tag}"
     echo -e "  ${GREEN}${BOLD}7${PLAIN}. 更新脚本自身 (当前 v${VERSION})"
     echo -e "  ${GREEN}${BOLD}8${PLAIN}. 卸载脚本自身 (slib/缓存)"
     echo -e "  ${RED}${BOLD}0${PLAIN}. 退出"

@@ -36,7 +36,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 | **3. frps** | frp 服务端（fatedier/frp 官方二进制），内网穿透，装完直接打印 frpc 客户端配置示例 |
 | **4. sing-box 节点管理** | 调度入口，本体在 [qingshous/sing-box-sh](https://github.com/qingshous/sing-box-sh) 仓库独立维护（VLESS-REALITY / Hysteria2 / TUIC / AnyTLS / VLESS-Argo / Shadowsocks） |
 | **5. realm 端口转发管理** | 调度入口，本体在 [qingshous/realm-xwPF](https://github.com/qingshous/realm-xwPF) 仓库独立维护（realm 中转规则可视化管理、端口流量狗、链路测试） |
-| **6. 轻量版 realm** | 调度入口，本体在 [qingshous/realm-installer](https://github.com/qingshous/realm-installer) 仓库独立维护（精简转发管理：规则增删查、全系统兼容，低配机首选） |
+| **6. 轻量版 realm** | 调度入口，本体在 [qingshous/realm-installer](https://github.com/qingshous/realm-installer) 仓库独立维护（精简转发管理：规则增删查、全系统兼容，低配机首选），快捷命令 `rl` |
 
 两个版本的 WxChat 功能完全等价（都是反代企业微信 API），可任选其一安装，也可共存（不同端口）。
 
@@ -44,14 +44,14 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 ╔════════════════════════════════════════════╗
 ║         Slib 自用 VPS 服务管理脚本         ║
 ╚════════════════════════════════════════════╝
-  快捷命令: slib    版本: v1.7.0
+  快捷命令: slib    版本: v1.7.1
 
   1. WxChat 微信通知转发代理 (Docker 版)
   2. WxChat 微信通知转发代理 (nginx 版)
   3. frps 服务端 (frp 内网穿透)
   4. sing-box 节点管理 (VLESS-REALITY/Hy2/TUIC等)
-  5. realm 端口转发管理 (中转/流量狗)
-  6. 轻量版 realm (精简转发管理)
+  5. realm 转发管理 xwPF版 (流量狗/链路测试)
+  6. 轻量版 realm (realm-installer: 精简)
   7. 更新脚本自身
   8. 卸载脚本自身 (slib/缓存)
   0. 退出
@@ -152,11 +152,20 @@ token 随机生成（hex 32位），安装完成时打印，菜单"查看 token"
 
 主菜单选 6 进入轻量版 realm 转发管理。调度模式，本体在 [qingshous/realm-installer](https://github.com/qingshous/realm-installer) 仓库独立维护（基于 playfulsoul 版全系统兼容重构）。
 
-- **本机已装过**：直接调用本机 `realm` 菜单（平时也可直接输 `realm` 进入）
-- **本机未装**：自动拉取 `install.sh`（ghproxy 回退 + 校验），进入其菜单选 1 安装，装完自动生成 `realm` 快捷命令
+- **本机已装过**：直接调用本机 `rl` 菜单（平时也可直接输 `rl` 进入；旧版的 `realm` 快捷命令会自动迁移清理）
+- **本机未装**：自动拉取 `install.sh`（ghproxy 回退 + 校验），进入其菜单选 1 安装，装完自动生成 `rl` 快捷命令
 - 退出菜单后自动返回本脚本主菜单
 
-与菜单 5（realm-xwPF）的区别：xwPF 功能全（流量狗/链路测试/故障转移），轻量版只做规则增删查，胜在小巧、全系统兼容（Alpine/musl、无 systemd 的 NAT 机），低配机首选。**注意两者服务名相同（realm），不要同时运行两套转发**。
+与菜单 5（realm-xwPF）的区别：xwPF 功能全（流量狗/链路测试/故障转移），轻量版只做规则增删查，胜在小巧、全系统兼容（Alpine/musl、无 systemd 的 NAT 机），低配机首选。
+
+**两套互斥提醒**：两者服务名（`realm.service`）和配置路径（`/etc/realm/config.toml`）完全相同，同时运行会互相接管，请只保留一套。为便于区分：
+
+| | 内核 | 快捷命令 | 进程名 |
+|---|---|---|---|
+| 菜单 5（xwPF） | `/usr/local/bin/realm` | `pf` | `realm` |
+| 菜单 6（轻量版） | `/usr/local/bin/realm-bin` | `rl` | `realm-bin` |
+
+主菜单状态标签按各自特征独立判断，不会互相误报。
 
 ---
 
