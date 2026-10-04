@@ -20,11 +20,12 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 - **NAT 网络自动检测**：检测到 NAT 网络（公网 IP ≠ 本机 IP）时，安装会提醒填写服务商分配的映射端口——NAT 机上随机端口外网无法访问
 - **回车即确认**：所有 y/n 交互默认 Y（如卸载确认），回车就是确认，输 `n` 取消；误触空格等无效输入会重新询问，不会误确认
 - **slib 快捷命令**：首次运行脚本后自动创建，以后在任意位置输入 `slib` 直接打开管理菜单（脚本更新时重跑一次即可刷新缓存）
-- **脚本自更新/自卸载**：主菜单选 4 从 GitHub 拉取最新版（对比版本号、语法校验后更新）；选 5 清理 slib 和缓存
+- **脚本自更新/自卸载**：主菜单选 8 从 GitHub 拉取最新版（对比版本号、语法校验后更新）；选 9 清理 slib 和缓存
 - **配置持久化 + 权限收紧**：安装信息保存在 `/etc/ziyong/`（目录 700、文件 600），frps token 配置文件 600 仅 root 可读
 - **init 系统全兼容**：systemd → OpenRC（Alpine 等，自动生成 `/etc/init.d/frps` 原生托管）→ nohup + pidfile 三级降级，低配 NAT 机也能跑
 - **状态判定真实可靠**：运行状态以端口真实响应为准（纯 bash 探测），不依赖 pgrep/ss/curl，低配最小化系统不误报
-- **防火墙自动放行**：检测到 ufw / firewalld 开启时自动放行所需端口（云厂商安全组仍需手动放行）
+- **防火墙自动放行**：检测到 ufw / firewalld 开启时自动放行所需端口，iperf3 额外放行 UDP（云厂商安全组仍需手动放行）
+- **iperf3 测速服务端**：直接装发行版软件包（Debian/CentOS/Alpine 全适配），支持"测完一键停用"防止带宽被滥用，服务定义按系统类型生成、不改包自带文件
 - **状态一目了然**：主菜单和子菜单实时显示每个服务的 `[运行中]` / `[已停止]` / `[未安装]` 状态
 
 ## 包含的服务
@@ -37,6 +38,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 | **4. sing-box 节点管理** | 调度入口，本体在 [qingshous/sing-box-sh](https://github.com/qingshous/sing-box-sh) 仓库独立维护（VLESS-REALITY / Hysteria2 / TUIC / AnyTLS / VLESS-Argo / Shadowsocks） |
 | **5. realm 端口转发管理** | 调度入口，本体在 [qingshous/realm-xwPF](https://github.com/qingshous/realm-xwPF) 仓库独立维护（realm 中转规则可视化管理、端口流量狗、链路测试） |
 | **6. 轻量版 realm** | 调度入口，本体在 [qingshous/realm-installer](https://github.com/qingshous/realm-installer) 仓库独立维护（精简转发管理：规则增删查、全系统兼容，低配机首选），快捷命令 `rl` |
+| **7. iperf3 测速服务端** | 原生软件包安装（无需 Docker/第三方仓库），带宽测速服务端，**测完可一键停用**防止被他人占用带宽，全系统兼容 |
 
 两个版本的 WxChat 功能完全等价（都是反代企业微信 API），可任选其一安装，也可共存（不同端口）。
 
@@ -44,7 +46,7 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
 ╔════════════════════════════════════════════╗
 ║         Slib 自用 VPS 服务管理脚本         ║
 ╚════════════════════════════════════════════╝
-  快捷命令: slib    版本: v1.7.1
+  快捷命令: slib    版本: v1.8.0
 
   1. WxChat 微信通知转发代理 (Docker 版)
   2. WxChat 微信通知转发代理 (nginx 版)
@@ -52,8 +54,9 @@ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/qingshou
   4. sing-box 节点管理 (VLESS-REALITY/Hy2/TUIC等)
   5. realm 转发管理 xwPF版 (流量狗/链路测试)
   6. 轻量版 realm (realm-installer: 精简)
-  7. 更新脚本自身
-  8. 卸载脚本自身 (slib/缓存)
+  7. iperf3 测速服务端 (带宽测速)
+  8. 更新脚本自身
+  9. 卸载脚本自身 (slib/缓存)
   0. 退出
 ```
 
@@ -169,6 +172,48 @@ token 随机生成（hex 32位），安装完成时打印，菜单"查看 token"
 
 ---
 
+## 7. iperf3 测速服务端
+
+主菜单选 7 进入 iperf3 带宽测速服务端管理。**直接装发行版官方软件包**（apt / dnf / yum / apk），不下载第三方二进制、不需要 Docker、不依赖任何外部仓库。
+
+**子菜单**：
+
+| 项 | 说明 |
+|----|------|
+| 1. 安装 / 启动 | 装包并配置服务；已装过则跳过装包直接配置/修复 |
+| 2. 一键停用 | **停止服务 + 关闭开机自启**（最常用：测速是偶发需求，平时关掉避免被扫描滥用、占用带宽） |
+| 3. 恢复启动 + 开机自启 | 撤销 [2] |
+| 4. 更换端口 | 默认 5201，可改；自动写服务覆盖，不动包自带文件 |
+| 5. 查看状态 / 测速命令 | 版本 / 运行 / 自启 / 端口 / 服务定义 + 现成的客户端命令 |
+| 6. 查看日志 | journalctl（systemd）/ 日志文件（OpenRC/nohup） |
+| 7. 卸载 | 移除服务配置，可选是否连软件包一起删 |
+
+**装完直接打印客户端命令**（复制到你的电脑或另一台机器执行）：
+
+```bash
+iperf3 -c <服务器IP> -p <端口>            # 上行测速
+iperf3 -c <服务器IP> -p <端口> -R         # 下行（测下载）
+iperf3 -c <服务器IP> -p <端口> -u -b 100M # UDP
+iperf3 -c <服务器IP> -p <端口> -P 4 -t 30 # 4 线程 / 30 秒
+```
+
+**全系统兼容**（自动适配，无需手动处理）：
+
+| 系统 | 安装 | 服务托管 | 改端口方式 |
+|------|------|---------|-----------|
+| Debian / Ubuntu | `apt install iperf3` | 用包自带 `iperf3.service` | systemd drop-in 覆盖（不动包文件） |
+| CentOS / Rocky | `dnf/yum install iperf3`（7 自动补 EPEL） | **自建** unit（包不带 unit） | 自建 unit 内嵌端口 |
+| Alpine | `apk add iperf3 iperf3-openrc` | 包自带 OpenRC init（`iperf3-openrc` 子包） | 写 `/etc/conf.d/iperf3` 的 `command_args` |
+| 无 init 系统 | — | nohup + pidfile 兜底 | 启动命令直接带端口 |
+
+- 运行状态以**端口真实可连接**为准，不依赖 `pgrep`/`ss`，低配最小化系统不误报
+- 防火墙自动放行 **TCP + UDP** 端口（UDP 供 `-u` 使用），云厂商安全组仍需手动放行
+- 支持 NAT 机：安装时会提醒填服务商的映射端口
+
+> 与市面上常见的 iperf3 管理脚本不同，本脚本**不使用固定 5201 端口**，也不要求服务文件预先存在——它自己按系统类型生成/覆盖服务定义，包自带的文件一个都不改。
+
+---
+
 ## 常见问题
 
 - **提示需要 root**：用 `sudo bash ziyong.sh` 运行。
@@ -176,6 +221,9 @@ token 随机生成（hex 32位），安装完成时打印，菜单"查看 token"
 - **frpc 连不上 frps**：先查安全组/防火墙是否放行 7000 端口，再核对 token 是否一致。
 - **WxChat 通知收不到**：检查企业微信可信 IP 是否填了 VPS 公网 IP；VPS 换 IP 后要同步更新。
 - **改了 frps 配置不生效**：子菜单 10 编辑后按提示重启，或 `systemctl restart frps`。
+- **iperf3 装完客户端连不上**：先确认安全组/防火墙放行了端口（UDP 测速要放 UDP），NAT 机还要确认填的是服务商映射端口。
+- **iperf3 显示已停止**：多半是[一键停用]过，选 3 恢复即可；测速属偶发需求，平时停用更安全。
+- **iperf3 会被别人用吗**：服务端无鉴权，知道 IP:端口的人都能压测。**测完请选 2 一键停用**，或改用非默认端口降低被扫概率。
 
 ## 本地运行
 
@@ -188,4 +236,5 @@ sudo bash ziyong.sh
 ## 说明
 
 - 脚本仅供自用，环境为常见 Debian / Ubuntu / CentOS x86_64（frps 另支持 arm64/arm）VPS。
+- iperf3 模块另兼容 Alpine（OpenRC）等无 systemd 环境，直接用发行版包管理器安装。
 - 脚本会执行安装/删除容器、systemd 服务等操作，请确认在 root 权限下运行。

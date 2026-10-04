@@ -9,6 +9,10 @@
 #    1. WxChat (Docker 版)   官方镜像 ddsderek/wxchat
 #    2. WxChat (nginx 版)    nginx 原生反代, 无需Docker, 兼容低配NAT机
 #    3. frps                 frp 服务端 (官方二进制 + systemd)
+#    4. sing-box            节点管理 (调度: qingshous/sing-box-sh)
+#    5. realm (xwPF)        端口转发管理 (调度: qingshous/realm-xwPF)
+#    6. realm (轻量版)      精简转发管理 (调度: qingshous/realm-installer, 快捷命令 rl)
+#    7. iperf3              测速服务端 (原生软件包 + 三通道托管, 测完可一键停用)
 #  特性:
 #    - 端口默认随机分配(自动避开占用), 回车即可, 输入有合法性校验
 #    - NAT 网络自动检测, 提醒使用服务商映射端口
@@ -25,7 +29,7 @@
 
 set -o pipefail
 
-VERSION="1.7.1"
+VERSION="1.9.0"
 
 # ================= 通用基础 =================
 
@@ -44,6 +48,24 @@ line() { echo -e "${CYAN}──────────────────�
 info() { echo -e "${GREEN}[信息]${PLAIN} $*"; }
 warn() { echo -e "${YELLOW}[注意]${PLAIN} $*"; }
 err()  { echo -e "${RED}[错误]${PLAIN} $*"; }
+
+# 版本号数字比较: 返回 0 表示 $1 < $2 (即 $2 更新)。仅支持 x.y.z 纯数字段。
+ver_lt() {
+    local a="$1" b="$2" pa pb
+    IFS='.' read -r -a pa <<< "$a"
+    IFS='.' read -r -a pb <<< "$b"
+    local i=0
+    while [ "$i" -lt 3 ]; do
+        local na="${pa[$i]:-0}" nb="${pb[$i]:-0}"
+        # 非纯数字段按字符串比较, 避免 10 < 9 的坑
+        case "$na" in *[!0-9]*) [ "$na" = "$nb" ] || { [ "$na" \< "$nb" ] && return 0; return 1; } ;; esac
+        case "$nb" in *[!0-9]*) [ "$na" = "$nb" ] || { [ "$na" \< "$nb" ] && return 0; return 1; } ;; esac
+        if [ "$na" -lt "$nb" ]; then return 0; fi
+        if [ "$na" -gt "$nb" ]; then return 1; fi
+        i=$((i+1))
+    done
+    return 1   # 相等或超出 3 段
+}
 
 pause_back() { read -rp "按回车返回菜单..." _; }
 
@@ -107,9 +129,10 @@ random_free_port() {
     local port
     while :; do
         port=$(( (RANDOM * 32768 + RANDOM) % 40000 + 20000 ))
-        if ! tcp_port_alive "$port" && ! (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q ":${port} "; then
-            echo "$port"; return
-        fi
+        # tcp_port_alive 是权威探测 (低配机 ss/netstat 可能全缺); ss/netstat 仅作附加校验
+        if tcp_port_alive "$port"; then continue; fi
+        if (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q ":${port} "; then continue; fi
+        echo "$port"; return
     done
 }
 
@@ -188,6 +211,7 @@ download() {
     fi
     curl -fL --max-time 120 --connect-timeout 10 "https://ghproxy.net/${url}" -o "$out" 2>/dev/null \
         || curl -fL --max-time 120 --connect-timeout 10 "https://gh-proxy.com/${url}" -o "$out" 2>/dev/null \
+        || curl -fL --max-time 120 --connect-timeout 10 "https://ghfast.top/${url}" -o "$out" 2>/dev/null \
         || return 1
 }
 
@@ -206,6 +230,22 @@ open_firewall_ports() {
         fi
     done
     warn "云服务器请自行确认厂商安全组已放行端口"
+}
+
+# 防火墙自动放行 UDP 端口 (iperf3 -u 用)
+open_firewall_ports_udp() {
+    local p
+    for p in "$@"; do
+        [ "$p" = "0" ] && continue
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+            ufw allow "${p}/udp" >/dev/null 2>&1 && info "ufw 已放行 ${p}/udp"
+        fi
+        if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+            firewall-cmd --permanent --add-port="${p}/udp" >/dev/null 2>&1 \
+                && firewall-cmd --reload >/dev/null 2>&1 \
+                && info "firewalld 已放行 ${p}/udp"
+        fi
+    done
 }
 
 # 自动安装 Docker (Docker 版 wxchat 用)
@@ -247,7 +287,7 @@ setup_shortcut() {
     # 缓存脚本自身 (bash 文件方式运行时)
     if [ -f "${BASH_SOURCE[0]}" ]; then
         mkdir -p "$ZIYONG_DIR"
-        cp -f "${BASH_SOURCE[0]}" "$CACHE_SCRIPT" 2>/dev/null
+        cat "${BASH_SOURCE[0]}" > "$CACHE_SCRIPT" 2>/dev/null
     fi
     # 创建快捷命令 (已存在则只更新缓存)
     if [ ! -f "$SHORTCUT" ]; then
@@ -258,7 +298,9 @@ setup_shortcut() {
             cat > "$SHORTCUT" <<'EOF'
 #!/usr/bin/env bash
 if curl -fsSL --max-time 15 https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh -o /tmp/ziyong.sh 2>/dev/null \
-   || curl -fsSL --max-time 15 https://ghproxy.net/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh -o /tmp/ziyong.sh 2>/dev/null; then
+   || curl -fsSL --max-time 15 https://ghproxy.net/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh -o /tmp/ziyong.sh 2>/dev/null \
+   || curl -fsSL --max-time 15 https://gh-proxy.com/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh -o /tmp/ziyong.sh 2>/dev/null \
+   || curl -fsSL --max-time 15 https://ghfast.top/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh -o /tmp/ziyong.sh 2>/dev/null; then
     bash /tmp/ziyong.sh
 else
     echo "[错误] 脚本下载失败, 请检查网络"
@@ -1367,6 +1409,11 @@ PF_ENTRY="/usr/local/bin/xwPF.sh"   # realm-xwPF 入口脚本
 PF_CMD="/usr/local/bin/pf"          # 其自带快捷命令 (软链到入口)
 PF_RAW="https://raw.githubusercontent.com/qingshous/realm-xwPF/main/xwPF.sh"
 
+# 轻量版 realm 的路径常量 (前置于 pf_running, 供其状态判定引用)
+RL_MENU="/usr/local/bin/rl"          # 轻量版快捷命令 (改为 rl, 原 realm 与 xwPF 内核抢路径)
+RL_LEGACY="/usr/local/bin/realm"     # 旧版快捷命令路径 (仅在确认是本脚本时使用)
+RL_BIN="/usr/local/bin/realm-bin"    # 内核
+
 pf_installed() { [ -f "$PF_ENTRY" ]; }
 
 # xwPF 的内核是 /usr/local/bin/realm (进程名 realm)
@@ -1418,9 +1465,6 @@ pf_launch() {
 #  轻量版 realm (调度模式: 本体在 qingshous/realm-installer 仓库维护)
 # ============================================================
 
-RL_MENU="/usr/local/bin/rl"          # 其自带快捷命令 (改为 rl, 原 realm 与 xwPF 内核抢路径)
-RL_LEGACY="/usr/local/bin/realm"     # 旧版快捷命令路径 (仅在确认是本脚本时使用)
-RL_BIN="/usr/local/bin/realm-bin"    # 内核
 RL_RAW="https://raw.githubusercontent.com/qingshous/realm-installer/main/install.sh"
 
 # 该路径上的文件是否为本脚本 (避免把 xwPF 的内核误判为轻量版菜单)
@@ -1489,6 +1533,470 @@ rl_launch() {
 }
 
 # ============================================================
+#  iperf3 测速服务端 (原生软件包 + systemd/OpenRC/nohup 三通道托管)
+# ============================================================
+
+IPF_SYS_UNIT="/etc/systemd/system/iperf3.service"       # CentOS 系无包自带 unit 时自建
+IPF_DROPIN_DIR="/etc/systemd/system/iperf3.service.d"   # Debian 系改端口(不动包自带 unit)
+IPF_DROPIN="${IPF_DROPIN_DIR}/ziyong.conf"
+IPF_CONFD="/etc/conf.d/iperf3"                          # Alpine OpenRC 改端口
+IPF_OPENRC="/etc/init.d/iperf3"
+IPF_PID_FILE="/run/iperf3.pid"
+IPF_LOG_FILE="/var/log/iperf3.log"
+IPF_CONF_PERSIST="${ZIYONG_DIR}/iperf3.conf"
+IPF_MARK="ziyong-iperf3"
+
+save_ipf_conf() { mkdir -p "$ZIYONG_DIR"; chmod 700 "$ZIYONG_DIR"; echo "IPF_PORT=${IPF_PORT}" > "$IPF_CONF_PERSIST"; chmod 600 "$IPF_CONF_PERSIST"; }
+load_ipf_conf() { IPF_PORT="5201"; [ -f "$IPF_CONF_PERSIST" ] && . "$IPF_CONF_PERSIST"; }
+
+ipf_bin() { command -v iperf3 2>/dev/null; }
+ipf_installed() { [ -n "$(ipf_bin)" ]; }
+
+# 发行版包自带的 systemd unit (Debian/Ubuntu 等, 避免我们覆盖包文件)
+ipf_pkg_unit() {
+    local f
+    for f in /lib/systemd/system/iperf3.service /usr/lib/systemd/system/iperf3.service; do
+        [ -f "$f" ] && { echo "$f"; return 0; }
+    done
+    return 1
+}
+
+# 进程检测 (pgrep -> /proc 扫描 -> pidfile 三级兜底)
+ipf_proc_alive() {
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -x iperf3 >/dev/null 2>&1 && return 0
+    fi
+    grep -qs '^iperf3$' /proc/[0-9]*/comm 2>/dev/null && return 0
+    [ -f "$IPF_PID_FILE" ] && kill -0 "$(cat "$IPF_PID_FILE" 2>/dev/null)" 2>/dev/null && return 0
+    return 1
+}
+
+# 运行判定 = 监听端口真实可连接 (权威), 退化为进程检测
+ipf_running() {
+    ipf_installed || return 1
+    [ -z "$IPF_PORT" ] && load_ipf_conf
+    tcp_port_alive "$IPF_PORT" && return 0
+    ipf_proc_alive
+}
+
+ipf_kill_all() {
+    [ -f "$IPF_PID_FILE" ] && kill "$(cat "$IPF_PID_FILE" 2>/dev/null)" 2>/dev/null
+    command -v pkill >/dev/null 2>&1 && pkill -x iperf3 2>/dev/null
+    local pid
+    for pid in $(grep -ls '^iperf3$' /proc/[0-9]*/comm 2>/dev/null | cut -d/ -f3); do
+        kill "$pid" 2>/dev/null
+    done
+}
+
+# 自建 systemd unit (发行版不提供 unit 时, 如 CentOS 系)
+ipf_write_unit() {
+    cat > "$IPF_SYS_UNIT" <<EOF
+# managed by ${IPF_MARK}
+[Unit]
+Description=iperf3 server (ziyong)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$(ipf_bin) --server --port ${IPF_PORT}
+Restart=always
+RestartSec=15
+SuccessExitStatus=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# 自建 OpenRC init (发行版不提供时兜底)
+ipf_write_openrc() {
+    cat > "$IPF_OPENRC" <<EOF
+#!/sbin/openrc-run
+# managed by ${IPF_MARK}
+name="iperf3"
+description="iperf3 server (ziyong)"
+command="$(ipf_bin)"
+command_args="--server --port ${IPF_PORT}"
+command_background="yes"
+pidfile="${IPF_PID_FILE}"
+output_log="${IPF_LOG_FILE}"
+error_log="${IPF_LOG_FILE}"
+EOF
+    chmod +x "$IPF_OPENRC"
+}
+
+# 把端口应用到当前系统的服务定义 (优先用包自带文件, 只写覆盖/自建)
+ipf_apply_port() {
+    if has_systemd; then
+        if ipf_pkg_unit >/dev/null 2>&1; then
+            mkdir -p "$IPF_DROPIN_DIR"
+            cat > "$IPF_DROPIN" <<EOF
+# managed by ${IPF_MARK}
+[Service]
+ExecStart=
+ExecStart=$(ipf_bin) --server --port ${IPF_PORT}
+EOF
+        else
+            ipf_write_unit
+        fi
+        systemctl daemon-reload >/dev/null 2>&1
+        return
+    fi
+    if has_openrc; then
+        if [ -f "$IPF_OPENRC" ] && grep -q "$IPF_MARK" "$IPF_OPENRC" 2>/dev/null; then
+            ipf_write_openrc
+        elif [ -f "$IPF_OPENRC" ]; then
+            cat > "$IPF_CONFD" <<EOF
+# managed by ${IPF_MARK}
+command_args="--port ${IPF_PORT}"
+EOF
+        else
+            ipf_write_openrc
+        fi
+    fi
+}
+
+# iperf3 服务控制, 三通道: systemd / OpenRC / nohup+pidfile
+ipf_ctl() {
+    local action="$1"
+    if has_systemd; then
+        case "$action" in
+            enable)  systemctl enable --now iperf3 ;;
+            disable) systemctl disable --now iperf3 ;;
+            *)       systemctl "$action" iperf3 ;;
+        esac
+        return
+    fi
+    if has_openrc && [ -f "$IPF_OPENRC" ]; then
+        case "$action" in
+            enable)  rc-update add iperf3 default >/dev/null 2>&1; rc-service iperf3 start ;;
+            disable) rc-service iperf3 stop >/dev/null 2>&1; rc-update del iperf3 default >/dev/null 2>&1 ;;
+            *)       rc-service iperf3 "$action" ;;
+        esac
+        return
+    fi
+    case "$action" in
+        enable|start)
+            ipf_proc_alive && return 0
+            [ -f "$IPF_LOG_FILE" ] && [ "$(stat -c%s "$IPF_LOG_FILE" 2>/dev/null || echo 0)" -gt 10485760 ] && : > "$IPF_LOG_FILE"
+            nohup "$(ipf_bin)" --server --port "${IPF_PORT}" >>"$IPF_LOG_FILE" 2>&1 &
+            echo $! > "$IPF_PID_FILE"
+            sleep 1
+            ipf_proc_alive
+            ;;
+        stop)
+            ipf_kill_all
+            rm -f "$IPF_PID_FILE"
+            sleep 1
+            ! ipf_proc_alive
+            ;;
+        restart)
+            ipf_ctl stop >/dev/null 2>&1
+            sleep 1
+            ipf_ctl start
+            ;;
+        disable)
+            ipf_ctl stop
+            ;;
+    esac
+}
+
+# 设置开机自启
+ipf_setup_autostart() {
+    if has_systemd; then systemctl enable iperf3 >/dev/null 2>&1; return 0; fi
+    if has_openrc && [ -f "$IPF_OPENRC" ]; then rc-update add iperf3 default >/dev/null 2>&1; return 0; fi
+    if command -v crontab >/dev/null 2>&1; then
+        ( crontab -l 2>/dev/null | grep -v "$IPF_MARK"; echo "@reboot $(ipf_bin) --server --port ${IPF_PORT} >>${IPF_LOG_FILE} 2>&1 &  # $IPF_MARK" ) | crontab - \
+            && { info "已通过 crontab @reboot 设置开机自启"; return 0; }
+    fi
+    warn "无 systemd/OpenRC/crontab, 未能设置开机自启 (重启后需手动启动)"
+}
+
+# 清理开机自启
+ipf_remove_autostart() {
+    if has_systemd; then systemctl disable iperf3 >/dev/null 2>&1; return 0; fi
+    if has_openrc && [ -f "$IPF_OPENRC" ]; then rc-update del iperf3 default >/dev/null 2>&1; return 0; fi
+    command -v crontab >/dev/null 2>&1 && ( crontab -l 2>/dev/null | grep -v "$IPF_MARK" ) | crontab - 2>/dev/null
+    return 0
+}
+
+# 打印客户端测速命令
+ipf_show_client() {
+    local port="${1:-$IPF_PORT}" ip
+    ip=$(get_pub_ip)
+    echo ""
+    echo -e "  ${BOLD}服务端地址:${PLAIN} ${ip}:${port}"
+    echo ""
+    echo -e "  ${BOLD}客户端测速命令 (复制到电脑/另一台机器执行):${PLAIN}"
+    echo -e "    ${YELLOW}# 上行 (本机 -> 服务器)${PLAIN}"
+    echo -e "    iperf3 -c ${ip} -p ${port}"
+    echo -e "    ${YELLOW}# 下行 (服务器 -> 本机, 测下载)${PLAIN}"
+    echo -e "    iperf3 -c ${ip} -p ${port} -R"
+    echo -e "    ${YELLOW}# UDP (需指定带宽)${PLAIN}"
+    echo -e "    iperf3 -c ${ip} -p ${port} -u -b 100M"
+    echo -e "    ${YELLOW}# 4 线程并发 / 测 30 秒${PLAIN}"
+    echo -e "    iperf3 -c ${ip} -p ${port} -P 4 -t 30"
+}
+
+# 按包管理器安装 iperf3 (CentOS 7 自动补 EPEL; Alpine 补 openrc 子包)
+ipf_install_pkg() {
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iperf3
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y iperf3 || { dnf install -y epel-release >/dev/null 2>&1 && dnf install -y iperf3; }
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y iperf3 || { yum install -y epel-release >/dev/null 2>&1 && yum install -y iperf3; }
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache iperf3 iperf3-openrc
+    else
+        err "未识别的包管理器, 请手动安装 iperf3"; return 1
+    fi
+}
+
+ipf_install() {
+    check_root
+    echo ""
+    info "iperf3 测速服务端"
+    line
+    if ipf_installed; then
+        info "iperf3 已安装: $(iperf3 --version 2>/dev/null | head -1)"
+        info "继续配置/修复服务 (端口沿用已保存值)"
+    else
+        echo ""
+        info "正在安装 iperf3 软件包 ..."
+        ipf_install_pkg || { err "安装失败, 请检查网络/软件源"; return 1; }
+        hash -r 2>/dev/null
+        ipf_installed || { err "安装后未找到 iperf3 可执行文件"; return 1; }
+        info "iperf3 已安装: $(iperf3 --version 2>/dev/null | head -1)"
+    fi
+
+    echo ""
+    nat_port_hint
+    load_ipf_conf
+    # 首次安装给随机端口默认(避开公网扫描重灾区 5201), 重装则沿用已保存端口
+    local ipf_def
+    ipf_def="$IPF_PORT"
+    [ ! -f "$IPF_CONF_PERSIST" ] && ipf_def="$(random_free_port)"
+    IPF_PORT=$(ask_port "iperf3 监听端口" "$ipf_def" no "$IPF_PORT")
+
+    if ! has_systemd && ! has_openrc; then
+        warn "未检测到 systemd/OpenRC, 将使用 nohup 后台模式 (日志: ${IPF_LOG_FILE})"
+    fi
+
+    ipf_apply_port
+    ipf_setup_autostart
+    ipf_ctl restart >/dev/null 2>&1
+    sleep 1
+    if ! ipf_running; then
+        err "服务启动后未存活, 请检查日志: ${IPF_LOG_FILE}"
+        return 1
+    fi
+
+    save_ipf_conf
+    open_firewall_ports "$IPF_PORT"
+    open_firewall_ports_udp "$IPF_PORT"
+    echo ""
+    line
+    info "iperf3 测速服务端 已启动!"
+    ipf_show_client "$IPF_PORT"
+    echo ""
+    warn "测完建议回菜单选 2 (一键停用), 避免服务端长期暴露被他人占用带宽"
+    line
+}
+
+ipf_change_port() {
+    check_root
+    ipf_installed || { err "尚未安装 iperf3"; return 1; }
+    load_ipf_conf
+    local old="$IPF_PORT"
+    IPF_PORT=$(ask_port "新端口 (当前 ${old})" "$(random_free_port)" no "$old")
+    if [ "$IPF_PORT" = "$old" ]; then
+        info "端口未变化"
+        return 0
+    fi
+    ipf_apply_port
+    ipf_ctl restart >/dev/null 2>&1
+    sleep 1
+    if ! ipf_running; then
+        err "重启后服务未存活, 请检查日志: ${IPF_LOG_FILE}"
+        return 1
+    fi
+    save_ipf_conf
+    open_firewall_ports "$IPF_PORT"
+    open_firewall_ports_udp "$IPF_PORT"
+    info "端口已更换为 ${IPF_PORT} 并生效 (旧端口 ${old} 的防火墙规则如需回收请手动关闭)"
+    ipf_show_client "$IPF_PORT"
+}
+
+# 一键停用: 停止 + 关闭开机自启
+ipf_disable() {
+    check_root
+    ipf_installed || { err "尚未安装 iperf3"; return 1; }
+    ipf_ctl disable >/dev/null 2>&1
+    ipf_remove_autostart
+    sleep 1
+    if ipf_running; then
+        err "停止失败, 请检查"
+        return 1
+    fi
+    info "iperf3 已停止并关闭开机自启 (需要时选 3 恢复)"
+}
+
+# 恢复启动 + 开机自启
+ipf_enable() {
+    check_root
+    ipf_installed || { err "尚未安装 iperf3"; return 1; }
+    load_ipf_conf
+    ipf_apply_port
+    ipf_setup_autostart
+    ipf_ctl restart >/dev/null 2>&1
+    sleep 1
+    if ! ipf_running; then
+        err "启动失败, 请检查日志: ${IPF_LOG_FILE}"
+        return 1
+    fi
+    info "iperf3 已启动并设置开机自启"
+    ipf_show_client "$IPF_PORT"
+}
+
+ipf_status() {
+    ipf_installed || { err "尚未安装 iperf3"; return 1; }
+    load_ipf_conf
+    info "版本: $(iperf3 --version 2>/dev/null | head -1)"
+    if ipf_running; then
+        info "运行状态: ${GREEN}运行中${PLAIN}  (监听端口 ${IPF_PORT})"
+    else
+        warn "运行状态: ${RED}已停止${PLAIN}"
+        if ipf_proc_alive; then
+            echo -e "  iperf3 进程: ${GREEN}运行中${PLAIN} (但端口 ${IPF_PORT} 无响应)"
+        else
+            echo -e "  iperf3 进程: ${RED}未运行${PLAIN} (菜单选 3 启动)"
+        fi
+    fi
+    if has_systemd; then
+        if systemctl is-enabled --quiet iperf3 2>/dev/null; then
+            echo -e "  开机自启: ${GREEN}已启用${PLAIN}"
+        else
+            echo -e "  开机自启: ${RED}已禁用${PLAIN} (菜单选 3 启用)"
+        fi
+    fi
+    echo ""
+    info "服务定义:"
+    if has_systemd; then
+        ipf_pkg_unit >/dev/null 2>&1 && echo -e "  $(ipf_pkg_unit) (包自带)"
+        [ -f "$IPF_DROPIN" ] && echo -e "  ${IPF_DROPIN} (端口覆盖)"
+        [ -f "$IPF_SYS_UNIT" ] && echo -e "  ${IPF_SYS_UNIT} (ziyong 自建)"
+    elif has_openrc; then
+        [ -f "$IPF_OPENRC" ] && echo -e "  ${IPF_OPENRC} + ${IPF_CONFD}"
+    else
+        echo -e "  nohup 模式 (日志: ${IPF_LOG_FILE})"
+    fi
+    ipf_show_client "$IPF_PORT"
+    echo ""
+    info "当前公网IP: $(get_pub_ip)"
+}
+
+ipf_logs() {
+    ipf_installed || { err "尚未安装 iperf3"; return 1; }
+    if has_systemd; then
+        journalctl -u iperf3 -n 50 --no-pager 2>/dev/null || tail -n 50 "$IPF_LOG_FILE" 2>/dev/null
+    elif [ -s "$IPF_LOG_FILE" ]; then
+        tail -n 50 "$IPF_LOG_FILE"
+    elif command -v logread >/dev/null 2>&1; then
+        logread 2>/dev/null | grep -i iperf3 | tail -n 50
+    else
+        err "未找到日志 (iperf3 服务端仅在客户端连接时产生输出)"
+    fi
+    echo ""
+    warn "以上为最近 50 行 (iperf3 空闲时通常无日志, 有客户端连接才输出)"
+}
+
+ipf_uninstall() {
+    check_root
+    ipf_installed || { err "尚未安装 iperf3"; return 1; }
+    if ! ask_yn "确认卸载 iperf3 服务?" "Y"; then info "已取消"; return 0; fi
+
+    ipf_ctl disable >/dev/null 2>&1
+    ipf_remove_autostart
+    # 清理 ziyong 添加的定义 (不动发行版包自带文件)
+    rm -f "$IPF_DROPIN" 2>/dev/null
+    rmdir "$IPF_DROPIN_DIR" 2>/dev/null
+    if [ -f "$IPF_SYS_UNIT" ] && grep -q "$IPF_MARK" "$IPF_SYS_UNIT" 2>/dev/null; then
+        rm -f "$IPF_SYS_UNIT"
+    fi
+    if [ -f "$IPF_OPENRC" ] && grep -q "$IPF_MARK" "$IPF_OPENRC" 2>/dev/null; then
+        rm -f "$IPF_OPENRC"
+    fi
+    if [ -f "$IPF_CONFD" ] && grep -q "$IPF_MARK" "$IPF_CONFD" 2>/dev/null; then
+        printf 'command_args=""\n' > "$IPF_CONFD"
+    fi
+    has_systemd && systemctl daemon-reload >/dev/null 2>&1
+    rm -f "$IPF_CONF_PERSIST" "$IPF_PID_FILE"
+
+    if ask_yn "是否同时卸载 iperf3 软件包?" "N"; then
+        if command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y iperf3
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf remove -y iperf3
+        elif command -v yum >/dev/null 2>&1; then
+            yum remove -y iperf3
+        elif command -v apk >/dev/null 2>&1; then
+            apk del iperf3 iperf3-openrc
+        fi
+        hash -r 2>/dev/null
+        if command -v iperf3 >/dev/null 2>&1; then
+            err "软件包卸载可能未完成, 请手动检查"
+        else
+            info "iperf3 软件包已卸载"
+        fi
+    else
+        info "已保留 iperf3 软件包 (仅移除服务配置)"
+    fi
+    info "iperf3 卸载完成"
+}
+
+ipf_menu() {
+    while true; do
+        load_ipf_conf
+        local tag="  ${RED}[未安装]${PLAIN}"
+        ipf_running && tag="  ${GREEN}[运行中]${PLAIN}"
+        ipf_installed && ! ipf_running && tag="  ${YELLOW}[已停止]${PLAIN}"
+        clear
+        echo -e "${CYAN}╔════════════════════════════════════════════╗"
+        echo -e "║        ${BOLD}iperf3 测速服务端 管理菜单${PLAIN}${CYAN}         ║"
+        echo -e "╚════════════════════════════════════════════╝${PLAIN}"
+        echo ""
+        echo -e "  当前状态: ${tag}"
+        echo ""
+        echo -e "  ${GREEN}${BOLD}1${PLAIN}.  安装 / 启动 iperf3 服务端"
+        echo -e "  ${GREEN}${BOLD}2${PLAIN}.  一键停用 (停止 + 关闭自启)"
+        echo -e "  ${GREEN}${BOLD}3${PLAIN}.  恢复启动 + 开机自启"
+        echo -e "  ${GREEN}${BOLD}4${PLAIN}.  更换端口"
+        echo -e "  ${GREEN}${BOLD}5${PLAIN}.  查看状态 / 测速命令"
+        echo -e "  ${GREEN}${BOLD}6${PLAIN}.  查看日志 (最近50行)"
+        echo -e "  ${RED}${BOLD}7${PLAIN}.  卸载 iperf3"
+        echo -e "  ${RED}${BOLD}0${PLAIN}.  返回上级菜单"
+        echo ""
+        line
+        read -rp "请输入选项 [0-7]: " sub
+        case "$sub" in
+            1) ipf_install;      pause_back ;;
+            2) ipf_disable;      pause_back ;;
+            3) ipf_enable;       pause_back ;;
+            4) ipf_change_port;  pause_back ;;
+            5) ipf_status;       pause_back ;;
+            6) ipf_logs;         pause_back ;;
+            7) ipf_uninstall;    pause_back ;;
+            0) return 0 ;;
+            *) warn "无效选项, 请重新输入"; sleep 1 ;;
+        esac
+    done
+}
+
+load_ipf_conf
+
+# ============================================================
 #  主菜单
 # ============================================================
 
@@ -1496,9 +2004,7 @@ rl_launch() {
 self_update() {
     local tmp="/tmp/ziyong_new.$$.sh" new_ver=""
     info "当前版本: v${VERSION}, 正在检查更新..."
-    if curl -fsSL --max-time 20 "https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh" -o "$tmp" 2>/dev/null \
-       || curl -fsSL --max-time 20 "https://ghproxy.net/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh" -o "$tmp" 2>/dev/null \
-       || curl -fsSL --max-time 20 "https://gh-proxy.com/https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh" -o "$tmp" 2>/dev/null; then
+    if download "https://raw.githubusercontent.com/qingshous/ziyong/main/ziyong.sh" "$tmp"; then
         new_ver=$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2)
         if [ -z "$new_ver" ]; then
             err "下载内容异常 (无版本号), 已取消更新"; rm -f "$tmp"; return 1
@@ -1506,14 +2012,19 @@ self_update() {
         if [ "$new_ver" = "$VERSION" ]; then
             info "已是最新版本 v${VERSION}"; rm -f "$tmp"; return 0
         fi
+        # 版本号递增校验: 拒绝降级 (防止误发旧版本被当"更新")
+        if ! ver_lt "$VERSION" "$new_ver"; then
+            warn "远端版本 v${new_ver} 不高于当前 v${VERSION}, 已取消更新"; rm -f "$tmp"; return 0
+        fi
         if ! bash -n "$tmp" 2>/dev/null; then
             err "下载的脚本语法校验失败, 已取消更新"; rm -f "$tmp"; return 1
         fi
         # 更新 slib 缓存 (slib 指向这里, 下次运行即新版)
         mkdir -p "$ZIYONG_DIR"
-        cp -f "$tmp" "$CACHE_SCRIPT" 2>/dev/null
-        # 文件方式运行时同时覆盖脚本本体
-        [ -f "${BASH_SOURCE[0]}" ] && cp -f "$tmp" "${BASH_SOURCE[0]}" 2>/dev/null
+        # 就地写覆盖 (而非 cp 换 inode): 避免 slib 软链/硬链因 inode 脱钩而失效
+        cat "$tmp" > "$CACHE_SCRIPT" 2>/dev/null
+        # 文件方式运行时同时覆盖脚本本体 (就地写, 不换 inode)
+        [ -f "${BASH_SOURCE[0]}" ] && cat "$tmp" > "${BASH_SOURCE[0]}" 2>/dev/null
         rm -f "$tmp"
         info "更新完成: v${VERSION} -> v${new_ver}"
         warn "请退出后重新运行 slib (或重跑本脚本) 使新版生效"
@@ -1543,6 +2054,7 @@ show_main_menu() {
     local sb_tag="  ${RED}[未安装]${PLAIN}"
     local pf_tag="  ${RED}[未安装]${PLAIN}"
     local rl_tag="  ${RED}[未安装]${PLAIN}"
+    local ipf_tag="  ${RED}[未安装]${PLAIN}"
     if wxd_running; then
         wxd_tag="  ${GREEN}[运行中]${PLAIN}"
     elif wxd_installed; then
@@ -1573,6 +2085,11 @@ show_main_menu() {
     elif rl_installed; then
         rl_tag="  ${YELLOW}[已停止]${PLAIN}"
     fi
+    if ipf_running; then
+        ipf_tag="  ${GREEN}[运行中]${PLAIN}"
+    elif ipf_installed; then
+        ipf_tag="  ${YELLOW}[已停止]${PLAIN}"
+    fi
     clear
     echo -e "${CYAN}╔════════════════════════════════════════════╗"
     echo -e "║         ${BOLD}Slib 自用 VPS 服务管理脚本${PLAIN}${CYAN}         ║"
@@ -1585,12 +2102,13 @@ show_main_menu() {
     echo -e "  ${GREEN}${BOLD}4${PLAIN}. sing-box 节点管理 (VLESS-REALITY/Hy2/TUIC等)${sb_tag}"
     echo -e "  ${GREEN}${BOLD}5${PLAIN}. realm 转发管理 xwPF版 (流量狗/链路测试)${pf_tag}"
     echo -e "  ${GREEN}${BOLD}6${PLAIN}. 轻量版 realm (realm-installer: 精简)${rl_tag}"
-    echo -e "  ${GREEN}${BOLD}7${PLAIN}. 更新脚本自身 (当前 v${VERSION})"
-    echo -e "  ${GREEN}${BOLD}8${PLAIN}. 卸载脚本自身 (slib/缓存)"
+    echo -e "  ${GREEN}${BOLD}7${PLAIN}. iperf3 测速服务端 (带宽测速)${ipf_tag}"
+    echo -e "  ${GREEN}${BOLD}8${PLAIN}. 更新脚本自身 (当前 v${VERSION})"
+    echo -e "  ${GREEN}${BOLD}9${PLAIN}. 卸载脚本自身 (slib/缓存)"
     echo -e "  ${RED}${BOLD}0${PLAIN}. 退出"
     echo ""
     line
-    read -rp "请选择要管理的服务 [0-8]: " main_choice
+    read -rp "请选择要管理的服务 [0-9]: " main_choice
 }
 
 main() {
@@ -1605,8 +2123,9 @@ main() {
             4) sb_launch;      pause_back ;;
             5) pf_launch;      pause_back ;;
             6) rl_launch;      pause_back ;;
-            7) self_update;    pause_back ;;
-            8) self_uninstall; pause_back ;;
+            7) ipf_menu ;;
+            8) self_update;    pause_back ;;
+            9) self_uninstall; pause_back ;;
             0) info "再见!"; exit 0 ;;
             *) warn "无效选项, 请重新输入"; sleep 1 ;;
         esac
