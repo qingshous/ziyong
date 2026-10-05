@@ -418,8 +418,13 @@ wxd_update() {
     fi
     load_wxd_conf
     info "更新 WxChat (拉最新镜像重建容器, 端口沿用 ${WXD_PORT})..."
-    docker pull "$WXD_IMAGE" && docker rm -f "$WXD_NAME"
-    docker run -d --name "$WXD_NAME" --restart=always -p "${WXD_PORT}:80" "$WXD_IMAGE"
+    if ! docker pull "$WXD_IMAGE"; then
+        err "镜像拉取失败, 请检查网络后重试"; return 1
+    fi
+    docker rm -f "$WXD_NAME" >/dev/null 2>&1
+    if ! docker run -d --name "$WXD_NAME" --restart=always -p "${WXD_PORT}:80" "$WXD_IMAGE"; then
+        err "容器启动失败 (端口 ${WXD_PORT} 可能被占用), 更新未完成"; return 1
+    fi
     info "更新完成"
 }
 
