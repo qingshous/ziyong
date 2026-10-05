@@ -29,7 +29,7 @@
 
 set -o pipefail
 
-VERSION="1.11.0"
+VERSION="1.12.0"
 
 # ================= 通用基础 =================
 
@@ -117,16 +117,34 @@ get_pub_ipv4() {
     [ -n "$ip" ] && echo "$ip"
 }
 
-# 获取公网 IPv6 (仅 v6, 无则空)
+# 获取本机公网 IPv6 (探测本机网卡上的公网段, 非出口地址)
+# NAT 机的出口 v6 可能是上游 NAT66 地址, 不可入站; 本机网卡上 2000:~3fff: 段才是真正可用的公网 v6
 get_pub_ipv6() {
-    local ip=""
-    ip=$(curl -6 -fsSL --max-time 5 https://api64.ipify.org 2>/dev/null) \
-        || ip=$(curl -6 -fsSL --max-time 5 https://6.ipw.cn 2>/dev/null) \
-        || ip=$(curl -6 -fsSL --max-time 5 https://ipv6.icanhazip.com 2>/dev/null)
-    # 校验含冒号才是 IPv6, 否则空
-    case "$ip" in
-        *:*) echo "$ip" ;;
-    esac
+    local line addr
+    if command -v ip >/dev/null 2>&1; then
+        while read -r line; do
+            addr=$(printf '%s\n' "$line" | sed -n 's/.*inet6 \([0-9a-fA-F:]*\)\/.*/\1/p')
+            [ -z "$addr" ] && continue
+            case "$addr" in
+                ::1|fe80:*|fd*|fc*) continue ;;   # 跳过回环/链路本地/ULA 私有段
+            esac
+            case "$addr" in
+                2[0-9a-fA-F]*|3[0-9a-fA-F]*) echo "$addr"; return ;;   # 2/3 开头 = 公网可路由段
+            esac
+        done < <(ip -6 addr show 2>/dev/null)
+    elif command -v ifconfig >/dev/null 2>&1; then
+        while read -r line; do
+            addr=$(printf '%s\n' "$line" | sed -n 's/.*inet6 addr: *\([0-9a-fA-F:]*\)\/.*/\1/p')
+            [ -z "$addr" ] && continue
+            case "$addr" in
+                ::1|fe80:*|fd*|fc*) continue ;;
+            esac
+            case "$addr" in
+                2[0-9a-fA-F]*|3[0-9a-fA-F]*) echo "$addr"; return ;;
+            esac
+        done < <(ifconfig 2>/dev/null)
+    fi
+    # 本机网卡上无公网 v6 -> 空 (NAT 机/无 v6 机器)
 }
 
 gen_token() {
