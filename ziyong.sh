@@ -29,7 +29,7 @@
 
 set -o pipefail
 
-VERSION="1.9.0"
+VERSION="1.10.0"
 
 # ================= 通用基础 =================
 
@@ -102,6 +102,31 @@ get_pub_ip() {
         || ip=$(curl -4 -fsSL --max-time 5 http://members.3322.org/dyndns/getip 2>/dev/null) \
         || ip="获取失败"
     echo "$ip"
+}
+
+# 获取公网 IPv4 (仅 v4, 无则空)
+get_pub_ipv4() {
+    local ip=""
+    ip=$(curl -4 -fsSL --max-time 5 https://api.ipify.org 2>/dev/null) \
+        || ip=$(curl -4 -fsSL --max-time 5 https://ip.sb 2>/dev/null) \
+        || ip=$(curl -4 -fsSL --max-time 5 https://4.ipw.cn 2>/dev/null)
+    # 校验为纯 IPv4 才返回, 否则空 (防代理出口返回 v6)
+    case "$ip" in
+        *[!0-9.]*) return 0 ;;
+    esac
+    [ -n "$ip" ] && echo "$ip"
+}
+
+# 获取公网 IPv6 (仅 v6, 无则空)
+get_pub_ipv6() {
+    local ip=""
+    ip=$(curl -6 -fsSL --max-time 5 https://api64.ipify.org 2>/dev/null) \
+        || ip=$(curl -6 -fsSL --max-time 5 https://6.ipw.cn 2>/dev/null) \
+        || ip=$(curl -6 -fsSL --max-time 5 https://ipv6.icanhazip.com 2>/dev/null)
+    # 校验含冒号才是 IPv6, 否则空
+    case "$ip" in
+        *:*) echo "$ip" ;;
+    esac
 }
 
 gen_token() {
@@ -2047,6 +2072,17 @@ self_uninstall() {
     info "已取消"
 }
 
+# 显示 VPS 的 IPv4 / IPv6 (进程内缓存, 首次探测后复用, 避免每次菜单刷新都 curl)
+show_ip_info() {
+    if [ -z "$_IP_CACHED" ]; then
+        _IPV4_PUB="$(get_pub_ipv4)"
+        _IPV6_PUB="$(get_pub_ipv6)"
+        _IP_CACHED=1
+    fi
+    echo -e "  ${CYAN}IPv4:${PLAIN} $([ -n "$_IPV4_PUB" ] && echo "$_IPV4_PUB" || echo "${RED}无 IPv4${PLAIN}")"
+    echo -e "  ${CYAN}IPv6:${PLAIN} $([ -n "$_IPV6_PUB" ] && echo "$_IPV6_PUB" || echo "${RED}无 IPv6${PLAIN}")"
+}
+
 show_main_menu() {
     local wxd_tag="  ${RED}[未安装]${PLAIN}"
     local wx_tag="  ${RED}[未安装]${PLAIN}"
@@ -2095,6 +2131,7 @@ show_main_menu() {
     echo -e "║         ${BOLD}Slib 自用 VPS 服务管理脚本${PLAIN}${CYAN}         ║"
     echo -e "╚════════════════════════════════════════════╝${PLAIN}"
     echo -e "  ${CYAN}快捷命令: slib    版本: v${VERSION}${PLAIN}"
+    show_ip_info
     echo ""
     echo -e "  ${GREEN}${BOLD}1${PLAIN}. WxChat 微信通知转发代理 (Docker 版)${wxd_tag}"
     echo -e "  ${GREEN}${BOLD}2${PLAIN}. WxChat 微信通知转发代理 (nginx 版)${wx_tag}"
