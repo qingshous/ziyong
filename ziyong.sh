@@ -29,7 +29,7 @@
 
 set -o pipefail
 
-VERSION="1.10.0"
+VERSION="1.11.0"
 
 # ================= 通用基础 =================
 
@@ -1398,9 +1398,30 @@ sb_running() {
     return 1
 }
 
-# 已装 -> 直接调本机 sb 面板; 未装 -> 在线拉取 install.sh 执行 (自动装 sb)
+# 静默检查并更新 sb 面板脚本 (已装时选 4 会先走这里, 拉到新版才替换, 失败保留旧版)
+sb_update_check() {
+    local tmp="/tmp/sb_update.$$.sh"
+    if ! download "$SB_RAW" "$tmp"; then
+        rm -f "$tmp"; return 1   # 拉取失败 -> 不进面板前报错, 静默用旧版
+    fi
+    # 复用 sing-box-sh 自带的 fetch_script 校验标记, 防止坏脚本覆盖
+    if ! head -n 1 "$tmp" | grep -q '^#!/bin/bash' \
+       || ! grep -q '^menu$' "$tmp" \
+       || ! grep -q '^install_kernel() {' "$tmp" \
+       || ! grep -q '^add_config() {' "$tmp" \
+       || ! bash -n "$tmp" 2>/dev/null; then
+        rm -f "$tmp"; return 1   # 校验失败 -> 保留旧版
+    fi
+    # 校验通过: 就地写覆盖 (不换 inode)
+    cat "$tmp" > "$SB_CMD" 2>/dev/null && chmod 755 "$SB_CMD" 2>/dev/null
+    rm -f "$tmp"
+    return 0
+}
+
+# 已装 -> 先静默检查更新再进面板; 未装 -> 在线拉取 install.sh 执行 (自动装 sb)
 sb_launch() {
     if [ -f "$SB_CMD" ]; then
+        sb_update_check
         info "检测到本机已安装 sing-box 管理面板, 正在进入..."
         sleep 1
         bash "$SB_CMD"
