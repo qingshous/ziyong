@@ -1416,11 +1416,12 @@ sb_running() {
     return 1
 }
 
-# 静默检查并更新 sb 面板脚本 (已装时选 4 会先走这里, 拉到新版才替换, 失败保留旧版)
+# 检查并更新 sb 面板脚本 (已装时选 4 会先走这里, 拉到新版才替换, 失败保留旧版并提示)
 sb_update_check() {
     local tmp="/tmp/sb_update.$$.sh"
     if ! download "$SB_RAW" "$tmp"; then
-        rm -f "$tmp"; return 1   # 拉取失败 -> 不进面板前报错, 静默用旧版
+        warn "sing-box 面板更新检查失败 (网络问题), 继续使用当前已安装版本"
+        rm -f "$tmp"; return 1
     fi
     # 复用 sing-box-sh 自带的 fetch_script 校验标记, 防止坏脚本覆盖
     if ! head -n 1 "$tmp" | grep -q '^#!/bin/bash' \
@@ -1428,10 +1429,20 @@ sb_update_check() {
        || ! grep -q '^install_kernel() {' "$tmp" \
        || ! grep -q '^add_config() {' "$tmp" \
        || ! bash -n "$tmp" 2>/dev/null; then
-        rm -f "$tmp"; return 1   # 校验失败 -> 保留旧版
+        warn "sing-box 面板下载内容校验失败, 保留当前版本"
+        rm -f "$tmp"; return 1
     fi
-    # 校验通过: 就地写覆盖 (不换 inode)
-    cat "$tmp" > "$SB_CMD" 2>/dev/null && chmod 755 "$SB_CMD" 2>/dev/null
+    # 对比是否需要更新 (本机 sb 与远程不同才替换)
+    if [ -f "$SB_CMD" ] && cmp -s "$tmp" "$SB_CMD"; then
+        rm -f "$tmp"; return 0   # 相同, 无需更新
+    fi
+    # 就地写覆盖 (不换 inode)
+    if cat "$tmp" > "$SB_CMD" 2>/dev/null && chmod 755 "$SB_CMD" 2>/dev/null; then
+        info "sing-box 面板已更新到最新版"
+    else
+        warn "sing-box 面板更新写入失败, 保留当前版本"
+        rm -f "$tmp"; return 1
+    fi
     rm -f "$tmp"
     return 0
 }
