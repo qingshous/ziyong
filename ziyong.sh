@@ -25,11 +25,12 @@
 #    - 自动检测 ufw/firewalld 并放行端口
 #    - 快捷命令: 首次运行后任意位置输入 slib 打开本脚本
 #    - 主菜单可一键自更新 (对比 VERSION)
+#    - sing-box 自动守护: 每 4 小时检测, 停止后自动重启 (菜单 4 -> 2)
 # ============================================================
 
 set -o pipefail
 
-VERSION="1.12.0"
+VERSION="1.13.0"
 
 # ================= 通用基础 =================
 
@@ -1452,7 +1453,7 @@ sb_update_check() {
     return 0
 }
 
-# 已装 -> 先静默检查更新再进面板; 未装 -> 在线拉取 install.sh 执行 (自动装 sb)
+# sing-box 主入口: 进入节点面板
 sb_launch() {
     if [ -f "$SB_CMD" ]; then
         sb_update_check
@@ -1479,6 +1480,170 @@ sb_launch() {
         err "下载失败 (已尝试直连/ghproxy/gh-proxy), 请检查网络后重试"
         return 1
     fi
+}
+
+# sing-box 管理菜单: 节点面板 + 自动守护
+sb_menu() {
+    while :; do
+        clear
+        line
+        echo -e "  ${BOLD}sing-box 管理${PLAIN}"
+        line
+        if sb_running; then
+            echo -e "  状态: ${GREEN}[运行中]${PLAIN}"
+        elif sb_installed; then
+            echo -e "  状态: ${YELLOW}[已停止]${PLAIN}"
+        else
+            echo -e "  状态: ${RED}[未安装]${PLAIN}"
+        fi
+        if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q "$SB_WD_MARK"; then
+            echo -e "  守护: ${GREEN}[已开启]${PLAIN} (每 4 小时检测)"
+        else
+            echo -e "  守护: ${YELLOW}[未开启]${PLAIN}"
+        fi
+        line
+        echo -e "  ${GREEN}${BOLD}1${PLAIN}. 进入节点管理面板 (添加/切换节点)"
+        echo -e "  ${GREEN}${BOLD}2${PLAIN}. 自动守护 (停止后自动重启)"
+        echo -e "  ${GREEN}${BOLD}0${PLAIN}. 返回主菜单"
+        line
+        read -rp "请选择: " c
+        case "$c" in
+            1) sb_launch; pause_back ;;
+            2) sb_watchdog_menu ;;
+            0) return 0 ;;
+            *) warn "无效输入" ;;
+        esac
+    done
+}
+
+# ---- sing-box 守护 (watchdog) ----
+# 每 N 小时检测一次, 若 sing-box 已安装但未运行则自动拉起
+SB_WD_MARK="ziyong-sb-watchdog"          # crontab 行的唯一标记
+SB_WD_LOG="/var/log/ziyong-sb-watchdog.log"
+SB_WD_CRON="0 */4 * * * /usr/local/bin/sb-watchdog >>${SB_WD_LOG} 2>&1  # ${SB_WD_MARK}"
+
+# 守护脚本落盘 (独立脚本, 供 cron 定时调用; 内部不依赖 ziyong.sh 交互)
+sb_watchdog_write() {
+    cat > /usr/local/bin/sb-watchdog <<'SBWD_EOF'
+#!/usr/bin/env bash
+# ziyong.sh 生成的 sing-box 守护脚本 (每 4 小时 cron 调用)
+# 仅负责: 检测 sing-box 已安装但未运行 -> 拉起; 运行中则不做任何事
+
+# 存活探测: 与 ziyong.sh sb_running() 同口径
+is_running() {
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        systemctl is-active --quiet sing-box 2>/dev/null && return 0
+    elif command -v rc-service >/dev/null 2>&1; then
+        rc-service sing-box status >/dev/null 2>&1 && return 0
+    fi
+    local p
+    for p in /proc/[0-9]*/comm; do
+        [ "$(cat "$p" 2>/dev/null)" = "sing-box" ] && return 0
+    done
+    return 1
+}
+
+start_sb() {
+    # 按托管方式优先级拉起: systemd -> OpenRC -> nohup 兜底
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        if systemctl start sing-box 2>/dev/null; then
+            echo "[$(date '+%F %T')] 检测到 sing-box 已停止, 已通过 systemd 自动重启"
+            return 0
+        fi
+    fi
+    if command -v rc-service >/dev/null 2>&1; then
+        if rc-service sing-box start >/dev/null 2>&1; then
+            echo "[$(date '+%F %T')] 检测到 sing-box 已停止, 已通过 OpenRC 自动重启"
+            return 0
+        fi
+    fi
+    # nohup 兜底 (用 sing-box 二进制 + 已知配置路径, 找不到配置则放弃)
+    if [ -x /usr/local/bin/sing-box ]; then
+        local cfg=""
+        for c in /usr/local/etc/sing-box/config.json /etc/sing-box/config.json; do
+            [ -f "$c" ] && { cfg="$c"; break; }
+        done
+        if [ -n "$cfg" ]; then
+            if nohup /usr/local/bin/sing-box run -c "$cfg" >>/var/log/sing-box-watchdog.log 2>&1 & then
+                echo "[$(date '+%F %T')] 检测到 sing-box 已停止, 已通过 nohup 自动重启 (配置: $cfg)"
+                return 0
+            fi
+        fi
+    fi
+    echo "[$(date '+%F %T')] sing-box 已停止但自动重启失败 (无法确定托管方式/配置), 请手动处理"
+    return 1
+}
+
+# 已安装才进入守护判断; 未安装直接退出(不刷日志)
+if [ ! -f /usr/local/bin/sb ] && [ ! -x /usr/local/bin/sing-box ]; then
+    exit 0
+fi
+
+if ! is_running; then
+    start_sb
+fi
+SBWD_EOF
+    chmod 755 /usr/local/bin/sb-watchdog
+}
+
+# 开启守护: 写守护脚本 + 注册 cron
+sb_watchdog_on() {
+    sb_watchdog_write || { err "守护脚本写入失败"; return 1; }
+    if ! command -v crontab >/dev/null 2>&1; then
+        err "系统无 crontab, 无法定时守护 (请安装 cronie/vixie-cron 后重试)"
+        return 1
+    fi
+    # 先清除旧行再追加, 防重复注册
+    ( crontab -l 2>/dev/null | grep -v "$SB_WD_MARK"; echo "$SB_WD_CRON" ) | crontab -
+    info "sing-box 守护已开启: 每 4 小时检测一次, 停止后自动重启"
+    info "守护日志: ${SB_WD_LOG}"
+}
+
+# 关闭守护: 移除 cron 行 (保留守护脚本不删, 便于随时重开)
+sb_watchdog_off() {
+    if ! command -v crontab >/dev/null 2>&1; then return 0; fi
+    crontab -l 2>/dev/null | grep -v "$SB_WD_MARK" | crontab - 2>/dev/null
+    info "sing-box 守护已关闭"
+}
+
+# 查询守护状态
+sb_watchdog_status() {
+    if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q "$SB_WD_MARK"; then
+        info "sing-box 守护: ${GREEN}已开启${PLAIN} (每 4 小时检测一次)"
+        crontab -l 2>/dev/null | grep "$SB_WD_MARK"
+    else
+        info "sing-box 守护: ${YELLOW}未开启${PLAIN}"
+    fi
+    if [ -f "$SB_WD_LOG" ]; then
+        echo -e "最近守护日志:"
+        tail -n 5 "$SB_WD_LOG" 2>/dev/null
+    fi
+}
+
+# 守护管理菜单入口
+sb_watchdog_menu() {
+    while :; do
+        clear
+        line
+        echo -e "  ${BOLD}sing-box 自动守护 (watchdog)${PLAIN}"
+        line
+        sb_watchdog_status
+        line
+        echo -e "  ${GREEN}${BOLD}1${PLAIN}. 开启守护 (每 4 小时检测, 停止自动重启)"
+        echo -e "  ${GREEN}${BOLD}2${PLAIN}. 关闭守护"
+        echo -e "  ${GREEN}${BOLD}3${PLAIN}. 立即检测一次 (手动触发)"
+        echo -e "  ${GREEN}${BOLD}0${PLAIN}. 返回"
+        line
+        read -rp "请选择: " c
+        case "$c" in
+            1) sb_watchdog_on ;;
+            2) sb_watchdog_off ;;
+            3) sb_watchdog_write; /usr/local/bin/sb-watchdog; info "已执行一次检测 (结果见上/日志)";;
+            0) return 0 ;;
+            *) warn "无效输入" ;;
+        esac
+        pause_back
+    done
 }
 
 # ============================================================
@@ -2212,7 +2377,7 @@ main() {
             1) wxd_menu ;;
             2) wx_menu ;;
             3) frps_menu ;;
-            4) sb_launch;      pause_back ;;
+            4) sb_menu ;;
             5) pf_launch;      pause_back ;;
             6) rl_launch;      pause_back ;;
             7) ipf_menu ;;
